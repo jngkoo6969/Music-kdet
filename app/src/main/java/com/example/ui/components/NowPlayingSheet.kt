@@ -195,7 +195,7 @@ fun NowPlayingSheet(
             // Full-screen artwork / lyrics / queue area (Apple Music style)
             Box(
                 modifier = Modifier
-                    // 60/40 split (ART_FRACTION); lyrics/queue keep the taller area.
+                    // 55/45 split (ART_FRACTION); lyrics/queue keep the taller area.
                     .weight(if (isLyricsViewVisible || isQueueViewVisible) 3f else ART_FRACTION)
                     .fillMaxWidth()
                     .onSizeChanged { artworkHeightPx = it.height }
