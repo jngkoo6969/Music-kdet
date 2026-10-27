@@ -28,6 +28,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -162,6 +163,8 @@ fun NowPlayingSheet(
         modifier = modifier
             .fillMaxSize()
             .background(backgroundGradient)
+            // Swallow taps on empty areas so they never reach the song list / mini player behind.
+            .pointerInput(Unit) { detectTapGestures { } }
             .testTag("now_playing_sheet")
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -385,7 +388,7 @@ fun NowPlayingSheet(
 
             // Seeker / Slider
             Column(modifier = Modifier.fillMaxWidth()) {
-                Slider(
+                ExpandingSlider(
                     value = currentPosition.toFloat(),
                     onValueChange = {
                         isDraggingSlider = true
@@ -396,15 +399,7 @@ fun NowPlayingSheet(
                         onSeekTo(sliderDragPosition.toLong())
                     },
                     valueRange = 0f..duration.toFloat(),
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = Color.White,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.2f)
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(28.dp)
-                        .testTag("now_playing_slider")
+                    modifier = Modifier.testTag("now_playing_slider")
                 )
 
                 Row(
@@ -484,7 +479,7 @@ fun NowPlayingSheet(
                     tint = Color.White.copy(alpha = 0.7f),
                     modifier = Modifier.size(20.dp)
                 )
-                Slider(
+                ExpandingSlider(
                     value = volume,
                     onValueChange = {
                         isDraggingVolume = true
@@ -493,14 +488,8 @@ fun NowPlayingSheet(
                     },
                     onValueChangeFinished = { isDraggingVolume = false },
                     valueRange = 0f..maxVolume.toFloat(),
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = Color.White,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.2f)
-                    ),
                     modifier = Modifier
                         .weight(1f)
-                        .height(28.dp)
                         .padding(horizontal = 8.dp)
                         .testTag("now_playing_volume")
                 )
