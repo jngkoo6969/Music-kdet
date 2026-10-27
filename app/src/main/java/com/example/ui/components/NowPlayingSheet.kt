@@ -1,6 +1,11 @@
 package com.example.ui.components
 
+import android.content.Context
+import android.media.AudioManager
 import android.os.Build
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawWithContent
@@ -127,6 +132,19 @@ fun NowPlayingSheet(
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragPosition by remember { mutableFloatStateOf(0f) }
 
+    // System media volume (follows the phone's volume buttons too)
+    val context = LocalContext.current
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
+    var volume by remember { mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
+    var isDraggingVolume by remember { mutableStateOf(false) }
+    LaunchedEffect(isDraggingVolume) {
+        while (!isDraggingVolume) {
+            volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+            delay(400)
+        }
+    }
+
     val currentPosition = if (isDraggingSlider) sliderDragPosition.toLong() else playbackState.currentPositionMs
     val duration = playbackState.durationMs.coerceAtLeast(1L)
     val remainingMs = (duration - currentPosition).coerceAtLeast(0L)
@@ -150,7 +168,7 @@ fun NowPlayingSheet(
             // Full-screen artwork / lyrics / queue area (Apple Music style)
             Box(
                 modifier = Modifier
-                    // 60/40 split (ART_FRACTION); lyrics/queue keep the taller area.
+                    // 50/50 split (ART_FRACTION); lyrics/queue keep the taller area.
                     .weight(if (isLyricsViewVisible || isQueueViewVisible) 3f else ART_FRACTION)
                     .fillMaxWidth()
                     .onSizeChanged { artworkHeightPx = it.height }
@@ -453,6 +471,45 @@ fun NowPlayingSheet(
                         modifier = Modifier.size(46.dp)
                     )
                 }
+            }
+
+            // Volume control
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.VolumeDown,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(20.dp)
+                )
+                Slider(
+                    value = volume,
+                    onValueChange = {
+                        isDraggingVolume = true
+                        volume = it
+                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, it.toInt(), 0)
+                    },
+                    onValueChangeFinished = { isDraggingVolume = false },
+                    valueRange = 0f..maxVolume.toFloat(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = Color.White,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                        .padding(horizontal = 8.dp)
+                        .testTag("now_playing_volume")
+                )
+                Icon(
+                    imageVector = Icons.Default.VolumeUp,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(20.dp)
+                )
             }
 
             // Secondary Controls: Shuffle, Repeat, Lyrics, Queue
