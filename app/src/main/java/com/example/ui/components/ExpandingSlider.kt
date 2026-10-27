@@ -5,6 +5,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
@@ -49,6 +51,7 @@ fun ExpandingSlider(
     val currentOnChange by rememberUpdatedState(onValueChange)
     val currentOnFinished by rememberUpdatedState(onValueChangeFinished)
     val currentRange by rememberUpdatedState(valueRange)
+    val currentValue by rememberUpdatedState(value)
 
     Canvas(
         modifier = modifier
@@ -56,25 +59,34 @@ fun ExpandingSlider(
             .height(32.dp) // generous touch area; the visible bar is much thinner
             .pointerInput(Unit) {
                 awaitEachGesture {
+                    // A plain tap/click does nothing: you must press and drag (hold) to change the value.
                     val down = awaitFirstDown(requireUnconsumed = false)
                     pressed = true
 
+                    val range = currentRange
+                    val span = range.endInclusive - range.start
+                    val startValue = currentValue
+
                     fun report(x: Float) {
-                        val fraction = (x / size.width.toFloat()).coerceIn(0f, 1f)
-                        val range = currentRange
-                        currentOnChange(range.start + fraction * (range.endInclusive - range.start))
+                        val dx = x - down.position.x
+                        val v = startValue + (dx / size.width.toFloat()) * span
+                        currentOnChange(v.coerceIn(range.start, range.endInclusive))
                     }
 
-                    report(down.position.x)
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (!change.pressed) break
-                        report(change.position.x)
+                    val slop = awaitHorizontalTouchSlopOrCancellation(down.id) { change, _ ->
                         change.consume()
                     }
-                    pressed = false
-                    currentOnFinished()
+                    if (slop != null) {
+                        report(slop.position.x)
+                        horizontalDrag(down.id) { change ->
+                            report(change.position.x)
+                            change.consume()
+                        }
+                        pressed = false
+                        currentOnFinished()
+                    } else {
+                        pressed = false
+                    }
                 }
             }
     ) {
