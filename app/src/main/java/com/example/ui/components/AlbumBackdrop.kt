@@ -31,11 +31,11 @@ import androidx.compose.ui.unit.dp
  *             (4 progressive layers), darkened, and faded in under the art.
  *
  * Screen fractions (same names as the CSS variables):
- *   ART_FRACTION      = --Hn    (50 %)  sharp art height
+ *   ART_FRACTION      = --Hn    (60 %)  sharp art height
  *   OVERLAP_FRACTION  = --On    (14 %)  how far the blurred half tucks up under the art
  *   SLICE_FRACTION    = --slice (30 %)  part of the art (from its bottom) used for the blur
  */
-const val ART_FRACTION = 0.50f
+const val ART_FRACTION = 0.60f // 60 / 40 split: art on top, controls below
 private const val OVERLAP_FRACTION = 0.14f
 private const val SLICE_FRACTION = 0.30f
 private const val ART_FADE_MS = 900
