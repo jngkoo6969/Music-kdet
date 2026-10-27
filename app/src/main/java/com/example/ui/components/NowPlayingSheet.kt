@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawWithContent
@@ -140,13 +141,36 @@ fun NowPlayingSheet(
     var volume by remember { mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
     var isDraggingVolume by remember { mutableStateOf(false) }
     LaunchedEffect(isDraggingVolume) {
-        while (!isDraggingVolume) {
-            volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
-            delay(400)
+        if (!isDraggingVolume) {
+            // Let the system apply the new level before we read it back, so the bar holds where it was set.
+            delay(600)
+            while (true) {
+                volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+                delay(400)
+            }
         }
     }
 
-    val currentPosition = if (isDraggingSlider) sliderDragPosition.toLong() else playbackState.currentPositionMs
+    // Seek bar: keep showing the released position until the player has actually caught up with the seek.
+    var pendingSeekMs by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(pendingSeekMs) {
+        if (pendingSeekMs != null) {
+            delay(1500)
+            pendingSeekMs = null
+        }
+    }
+    LaunchedEffect(playbackState.currentPositionMs) {
+        val pending = pendingSeekMs
+        if (pending != null && kotlin.math.abs(playbackState.currentPositionMs - pending) < 1200L) {
+            pendingSeekMs = null
+        }
+    }
+
+    val currentPosition = when {
+        isDraggingSlider -> sliderDragPosition.toLong()
+        pendingSeekMs != null -> pendingSeekMs!!
+        else -> playbackState.currentPositionMs
+    }
     val duration = playbackState.durationMs.coerceAtLeast(1L)
     val remainingMs = (duration - currentPosition).coerceAtLeast(0L)
 
@@ -171,7 +195,7 @@ fun NowPlayingSheet(
             // Full-screen artwork / lyrics / queue area (Apple Music style)
             Box(
                 modifier = Modifier
-                    // 50/50 split (ART_FRACTION); lyrics/queue keep the taller area.
+                    // 60/40 split (ART_FRACTION); lyrics/queue keep the taller area.
                     .weight(if (isLyricsViewVisible || isQueueViewVisible) 3f else ART_FRACTION)
                     .fillMaxWidth()
                     .onSizeChanged { artworkHeightPx = it.height }
@@ -395,8 +419,10 @@ fun NowPlayingSheet(
                         sliderDragPosition = it
                     },
                     onValueChangeFinished = {
+                        val target = sliderDragPosition.toLong()
+                        pendingSeekMs = target
                         isDraggingSlider = false
-                        onSeekTo(sliderDragPosition.toLong())
+                        onSeekTo(target)
                     },
                     valueRange = 0f..duration.toFloat(),
                     modifier = Modifier.testTag("now_playing_slider")
@@ -484,9 +510,16 @@ fun NowPlayingSheet(
                     onValueChange = {
                         isDraggingVolume = true
                         volume = it
-                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, it.toInt(), 0)
+                        val step = it.roundToInt().coerceIn(0, maxVolume)
+                        if (step != audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)) {
+                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, step, 0)
+                        }
                     },
-                    onValueChangeFinished = { isDraggingVolume = false },
+                    onValueChangeFinished = {
+                        // Snap to the level that was set and hold it there.
+                        volume = volume.roundToInt().coerceIn(0, maxVolume).toFloat()
+                        isDraggingVolume = false
+                    },
                     valueRange = 0f..maxVolume.toFloat(),
                     modifier = Modifier
                         .weight(1f)
