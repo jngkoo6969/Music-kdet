@@ -1,0 +1,6 @@
+{
+  "name": "My Music Player",
+  "description": "Premium Apple Music styled offline music player with genuine dual-engine crossfade, synced LRC lyrics, custom album artwork, and lockscreen media playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
