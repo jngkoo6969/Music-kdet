@@ -164,7 +164,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Songs blend into each other: the next song starts under the end of the current one, skipping silent intros and outros. Choose the overlap length.",
+                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, silent intro/outro), then the next one starts on a beat and is gently tempo-matched. Works offline. Choose the overlap length.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
