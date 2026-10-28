@@ -170,12 +170,8 @@ class MusicPlaybackService : Service() {
         updateSession(song, state.isPlaying, state.currentPositionMs, state.durationMs)
         val notification = buildNotification(song, state.isPlaying)
         goForeground(notification)
-        if (!state.isPlaying) {
-            // Paused: let the user swipe it away
-            try { stopForeground(STOP_FOREGROUND_DETACH); isForeground = false } catch (e: Exception) { }
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                .notify(notificationId, notification)
-        }
+        // Stay a foreground service while paused too. Detaching it made Android kill the
+        // service/process after a short while, which removed the player from the notification/lock screen.
     }
 
     private fun goForeground(notification: Notification) {
