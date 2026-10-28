@@ -3,12 +3,12 @@ package com.example.playback
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioManager
-import android.media.MediaCodec
-import android.media.MediaExtractor
-import android.media.MediaFormat
 import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import com.example.data.Song
 import kotlinx.coroutines.CancellationException
@@ -22,17 +22,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
-
-/** Where the music is actually audible (skips silent intro / outro). endMs = -1 if unknown. */
-data class AudibleBounds(val startMs: Long, val endMs: Long)
+import kotlin.coroutines.resume
 
 enum class RepeatMode {
     OFF, ALL, ONE
@@ -71,6 +70,24 @@ class AudioTransitionEngine(
     private var activePlayerIndex: Int = 0 // 0 for A, 1 for B
     private var isPreparedB = false
     private var preloadedSongId: Long? = null
+
+    // Automix: offline analysis (tempo / beats / audible bounds) and tempo matching state
+    private val analyzer = TrackAnalyzer(context)
+    private val analysisInFlight = ConcurrentHashMap<Long, Boolean>()
+    private var speedRampJob: Job? = null
+    private val targetSpeed = floatArrayOf(1f, 1f)       // speed we want each player to run at
+    private val speedDirty = booleanArrayOf(false, false)  // true = native speed must be (re)written
+    private val speedTouched = booleanArrayOf(false, false) // true = this player once ran at a non-1.0 speed
+    private var crossfadeFailedForId: Long? = null
+
+    private companion object {
+        /** Start preparing the blend this long before it is due (park B on its beat, wait for A's beat). */
+        const val PREROLL_MS = 2_500L
+        /** MediaPlayer.start() takes a few tens of ms to become audible; start that much early. */
+        const val START_LATENCY_MS = 40L
+        /** After the blend, the incoming song eases from the matched speed back to 1.0x over this time. */
+        const val SPEED_RAMP_MS = 6_000L
+    }
 
     private var crossfadeJob: Job? = null
     private var tickerJob: Job? = null
@@ -187,6 +204,15 @@ class AudioTransitionEngine(
         manualTransitionJob = null
         manualPreSwap = false
         pauseAfterManual = false
+        speedRampJob?.cancel()
+        speedRampJob = null
+        for (i in 0..1) {
+            if (speedTouched[i]) {
+                targetSpeed[i] = 1f
+                speedDirty[i] = true
+                flushSpeed(i)
+            }
+        }
         if (wasBusy) {
             try { standbyPlayer?.reset() } catch (e: Exception) { /* ignore */ }
             isPreparedB = false
@@ -217,6 +243,8 @@ class AudioTransitionEngine(
                 }
 
                 player.start()
+                flushSpeed(activePlayerIndex)
+                crossfadeFailedForId = null
 
                 _playbackState.value = _playbackState.value.copy(
                     currentSong = song,
@@ -296,6 +324,7 @@ class AudioTransitionEngine(
                 }
 
                 nextP.start()
+                flushSpeed(activePlayerIndex)
                 _playbackState.value = _playbackState.value.copy(
                     currentSong = nextSong,
                     isPlaying = true,
@@ -369,6 +398,8 @@ class AudioTransitionEngine(
             if (_playbackState.value.isCrossfading) {
                 standbyPlayer?.let { if (!it.isPlaying) it.start() }
             }
+            flushSpeed(0)
+            flushSpeed(1)
         } catch (e: Exception) {
             Log.e(tag, "Resume error", e)
         }
@@ -434,7 +465,7 @@ class AudioTransitionEngine(
 
     fun seekTo(positionMs: Long) {
         // Seeking cancels a running crossfade so the two songs can't get out of sync.
-        if (_playbackState.value.isCrossfading) abortTransitions()
+        if (_playbackState.value.isCrossfading || crossfadeJob?.isActive == true) abortTransitions()
         activePlayer?.let { player ->
             try {
                 player.seekTo(positionMs.toInt())
@@ -470,122 +501,89 @@ class AudioTransitionEngine(
 
 
     // ---------------------------------------------------------------------
-    // AUTOMIX analysis: find first / last audible moment of a song
+    // AUTOMIX analysis (tempo, beats, audible bounds) - 100 % on-device, works offline
     // ---------------------------------------------------------------------
-    private val boundsCache = ConcurrentHashMap<Long, AudibleBounds>()
-    private val boundsInFlight = ConcurrentHashMap<Long, Boolean>()
-
     private fun analyzeAsync(song: Song) {
-        if (boundsCache.containsKey(song.id)) return
-        if (boundsInFlight.putIfAbsent(song.id, true) != null) return
+        if (analyzer.cached(song) != null) return
+        if (analysisInFlight.putIfAbsent(song.id, true) != null) return
         engineScope.launch(Dispatchers.IO) {
-            try { getBounds(song) } finally { boundsInFlight.remove(song.id) }
+            try { analyzer.analyze(song) } finally { analysisInFlight.remove(song.id) }
         }
     }
 
-    private fun getBounds(song: Song): AudibleBounds {
-        boundsCache[song.id]?.let { return it }
-        val head = scanAudible(song, tail = false)
-        val tail = scanAudible(song, tail = true)
-        val bounds = AudibleBounds(startMs = head ?: 0L, endMs = tail ?: -1L)
-        boundsCache[song.id] = bounds
-        Log.d(tag, "Automix bounds for ${song.title}: start=${bounds.startMs} end=${bounds.endMs}")
-        return bounds
+    // ---------------------------------------------------------------------
+    // Tempo matching: playback speed of a player (pitch is preserved)
+    // ---------------------------------------------------------------------
+    private fun playerAt(index: Int): MediaPlayer? = if (index == 0) playerA else playerB
+
+    private fun setTargetSpeed(index: Int, speed: Float) {
+        targetSpeed[index] = speed
+        speedDirty[index] = true
+        if (abs(speed - 1f) > 0.001f) speedTouched[index] = true
+        flushSpeed(index)
     }
 
-    private fun scanAudible(song: Song, tail: Boolean): Long? {
-        val extractor = MediaExtractor()
-        var codec: MediaCodec? = null
+    /**
+     * Writes the wanted speed to the native player. Only done while the player is really playing:
+     * on some Android versions setPlaybackParams() on a paused / prepared player starts it by itself.
+     */
+    private fun flushSpeed(index: Int) {
+        if (!speedDirty[index]) return
+        val p = playerAt(index) ?: return
         try {
-            if (!song.filePath.isNullOrBlank() && File(song.filePath).exists()) {
-                extractor.setDataSource(song.filePath)
-            } else {
-                extractor.setDataSource(context, Uri.parse(song.uriString), null)
+            if (!p.isPlaying) return
+            p.playbackParams = PlaybackParams().setSpeed(targetSpeed[index]).setPitch(1.0f)
+            if (abs(targetSpeed[index] - 1f) < 0.001f) {
+                speedDirty[index] = false
+                speedTouched[index] = false
             }
-
-            var trackIndex = -1
-            for (i in 0 until extractor.trackCount) {
-                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)
-                if (mime != null && mime.startsWith("audio/")) { trackIndex = i; break }
-            }
-            if (trackIndex < 0) return null
-            extractor.selectTrack(trackIndex)
-            val format = extractor.getTrackFormat(trackIndex)
-            val mime = format.getString(MediaFormat.KEY_MIME) ?: return null
-            val durationMs = if (format.containsKey(MediaFormat.KEY_DURATION))
-                format.getLong(MediaFormat.KEY_DURATION) / 1000 else return null
-
-            val windowStartMs = if (tail) (durationMs - 15_000L).coerceAtLeast(0L) else 0L
-            val windowEndMs = if (tail) durationMs else minOf(12_000L, durationMs)
-
-            var sampleRate = if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) format.getInteger(MediaFormat.KEY_SAMPLE_RATE) else 44100
-            var channels = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else 2
-
-            codec = MediaCodec.createDecoderByType(mime)
-            codec.configure(format, null, null, 0)
-            codec.start()
-            if (windowStartMs > 0) extractor.seekTo(windowStartMs * 1000, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-
-            val info = MediaCodec.BufferInfo()
-            var inputDone = false
-            var outputDone = false
-            var first = -1L
-            var last = -1L
-            val threshold = 700 // about -33 dB on a 16-bit scale
-            var guard = 0
-
-            while (!outputDone && guard++ < 20_000) {
-                if (!inputDone) {
-                    val inIdx = codec.dequeueInputBuffer(5_000)
-                    if (inIdx >= 0) {
-                        val buf = codec.getInputBuffer(inIdx)
-                        val size = if (buf != null) extractor.readSampleData(buf, 0) else -1
-                        if (size < 0 || extractor.sampleTime > windowEndMs * 1000) {
-                            codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputDone = true
-                        } else {
-                            codec.queueInputBuffer(inIdx, 0, size, extractor.sampleTime, 0)
-                            extractor.advance()
-                        }
-                    }
-                }
-
-                val outIdx = codec.dequeueOutputBuffer(info, 5_000)
-                if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val of = codec.outputFormat
-                    if (of.containsKey(MediaFormat.KEY_SAMPLE_RATE)) sampleRate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                    if (of.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) channels = of.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                } else if (outIdx >= 0) {
-                    val out = codec.getOutputBuffer(outIdx)
-                    if (out != null && info.size > 0) {
-                        out.position(info.offset)
-                        out.limit(info.offset + info.size)
-                        val sb = out.order(ByteOrder.nativeOrder()).asShortBuffer()
-                        var peak = 0
-                        while (sb.hasRemaining()) {
-                            val v = abs(sb.get().toInt())
-                            if (v > peak) peak = v
-                        }
-                        val tMs = info.presentationTimeUs / 1000
-                        val chunkMs = info.size * 1000L / (2L * channels.coerceAtLeast(1) * sampleRate.coerceAtLeast(1))
-                        if (tMs >= windowStartMs && peak > threshold) {
-                            if (first < 0) first = tMs
-                            last = tMs + chunkMs
-                        }
-                    }
-                    codec.releaseOutputBuffer(outIdx, false)
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
-                }
-            }
-
-            return if (first < 0) null else if (tail) last else first
         } catch (e: Exception) {
-            Log.w(tag, "Automix scan failed for ${song.title}: ${e.message}")
-            return null
-        } finally {
-            try { codec?.stop() } catch (e: Exception) { }
-            try { codec?.release() } catch (e: Exception) { }
-            try { extractor.release() } catch (e: Exception) { }
+            Log.w(tag, "Could not set playback speed: ${e.message}")
+        }
+    }
+
+    /** Eases a player from its current (matched) speed back to normal speed. */
+    private fun startSpeedRamp(index: Int) {
+        speedRampJob?.cancel()
+        val from = targetSpeed[index]
+        if (abs(from - 1f) < 0.002f) {
+            setTargetSpeed(index, 1f)
+            return
+        }
+        speedRampJob = engineScope.launch {
+            val stepMs = 200L
+            val steps = (SPEED_RAMP_MS / stepMs).toInt()
+            for (i in 1..steps) {
+                while (isActive && !_playbackState.value.isPlaying) delay(stepMs)
+                setTargetSpeed(index, from + (1f - from) * (i.toFloat() / steps))
+                delay(stepMs)
+            }
+            setTargetSpeed(index, 1f)
+        }
+    }
+
+    /** Seeks and waits until the player really is there (so start() can't begin from the old position). */
+    private suspend fun seekAndWait(player: MediaPlayer, positionMs: Long) {
+        withTimeoutOrNull(1_500L) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                player.setOnSeekCompleteListener { mp ->
+                    mp.setOnSeekCompleteListener(null)
+                    if (cont.isActive) cont.resume(Unit)
+                }
+                cont.invokeOnCancellation {
+                    try { player.setOnSeekCompleteListener(null) } catch (e: Exception) { /* ignore */ }
+                }
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        player.seekTo(positionMs, MediaPlayer.SEEK_CLOSEST) // sample-accurate
+                    } else {
+                        player.seekTo(positionMs.toInt())
+                    }
+                } catch (e: Exception) {
+                    try { player.setOnSeekCompleteListener(null) } catch (e2: Exception) { /* ignore */ }
+                    if (cont.isActive) cont.resume(Unit)
+                }
+            }
         }
     }
 
@@ -627,11 +625,12 @@ class AudioTransitionEngine(
                             durationMs = duration
                         )
 
-                        // Automix trigger: the overlap ENDS where the outgoing song stops being audible
+                        // Automix trigger. We start a little BEFORE the blend is due so the incoming song
+                        // can be parked on one of its beats and released exactly on one of ours.
                         val currentSong = _playbackState.value.currentSong
                         if (currentSong != null) analyzeAsync(currentSong)
-                        val bounds = currentSong?.let { boundsCache[it.id] }
-                        val endMs = bounds?.endMs
+                        val analysis = currentSong?.let { analyzer.cached(it) }
+                        val endMs = analysis?.audibleEndMs
                             ?.takeIf { it > 0 && it <= duration }
                             ?: duration
 
@@ -640,11 +639,13 @@ class AudioTransitionEngine(
 
                         if (crossfadeSec > 0 &&
                             duration > (crossfadeMs + 2000L) &&
-                            (endMs - currentPos) <= crossfadeMs &&
+                            (endMs - currentPos) <= crossfadeMs + PREROLL_MS &&
+                            crossfadeJob?.isActive != true &&
                             !_playbackState.value.isCrossfading &&
+                            currentSong?.id != crossfadeFailedForId &&
                             _playbackState.value.repeatMode != RepeatMode.ONE
                         ) {
-                            startCrossfade(endMs - currentPos)
+                            startCrossfade(crossfadeMs)
                         }
                     } catch (e: Exception) {
                         // ignore transitory illegal state during track switch
@@ -656,6 +657,7 @@ class AudioTransitionEngine(
     }
 
     private fun swapToNextSong(nextP: MediaPlayer, nextSong: Song) {
+        crossfadeFailedForId = null
         activePlayerIndex = if (activePlayerIndex == 0) 1 else 0
         _playbackState.value = _playbackState.value.copy(
             currentSong = nextSong,
@@ -666,48 +668,71 @@ class AudioTransitionEngine(
     }
 
     /**
-     * iPhone-style automatic crossfade:
-     *  - equal-power curve (no volume dip in the middle)
-     *  - progress follows the OLD song's playback position, so pausing freezes the fade
-     *  - title / artwork switch at the midpoint of the fade
+     * iPhone-style Automix, entirely offline:
+     *  1. both songs were analyzed on the phone (tempo, beat grid, where the music starts / stops)
+     *  2. the incoming song is prepared and parked on one of ITS beats
+     *  3. it is released exactly when the outgoing song reaches one of ITS beats
+     *  4. the incoming song is time-stretched (pitch preserved) so both tempos match,
+     *     then eased back to normal speed after the blend
+     *  5. equal-power fade (no volume dip); progress follows the OUTGOING song's position,
+     *     so pausing freezes the fade
+     *  6. title / artwork switch at the midpoint of the fade
+     * If beat info is missing or the tempos are too far apart it falls back to a plain equal-power crossfade.
      */
-    private fun startCrossfade(remainingDurationMs: Long) {
+    private fun startCrossfade(crossfadeMs: Long) {
         val nextSong = getNextSong() ?: return
+        val currentSong = _playbackState.value.currentSong ?: return
         val currentP = activePlayer ?: return
         val nextP = standbyPlayer ?: return
-        val startPos = try { currentP.currentPosition.toLong() } catch (e: Exception) { return }
-        val totalMs = remainingDurationMs.coerceAtLeast(1000L)
-
-        _playbackState.value = _playbackState.value.copy(isCrossfading = true)
-        Log.d(tag, "Initiating crossfade to: ${nextSong.title} (remaining=${remainingDurationMs}ms)")
+        val nextIndex = if (activePlayerIndex == 0) 1 else 0
 
         crossfadeJob?.cancel()
         crossfadeJob = engineScope.launch {
             try {
-                // Automix: begin the incoming song where its music actually starts
-                val nextBounds = withContext(Dispatchers.IO) { getBounds(nextSong) }
+                val durationA = try { currentP.duration.toLong() } catch (e: Exception) { return@launch }
+                val plan = withContext(Dispatchers.IO) {
+                    MixPlanner.plan(
+                        analyzer.analyze(currentSong),
+                        analyzer.analyze(nextSong),
+                        durationA,
+                        crossfadeMs
+                    )
+                }
+                Log.d(tag, "Automix plan to '${nextSong.title}': $plan")
 
+                // Park the incoming song on its entry beat (silent)
                 if (!isPreparedB || preloadedSongId != nextSong.id) {
                     nextP.reset()
-                    nextP.setVolume(0.0f, 0.0f)
                     setDataSource(nextP, nextSong)
                     nextP.prepare()
                 }
-
                 nextP.setVolume(0.0f, 0.0f)
-                if (nextBounds.startMs in 150L..8_000L) nextP.seekTo(nextBounds.startMs.toInt())
-                // If the user already paused, resume() will start it later.
+                if (plan.startBMs >= 20L) seekAndWait(nextP, plan.startBMs)
+
+                // Wait for the outgoing song to reach its beat (nothing advances while paused)
+                val triggerPos = plan.startAMs - START_LATENCY_MS
+                while (isActive) {
+                    val pos = try { currentP.currentPosition.toLong() } catch (e: Exception) { return@launch }
+                    if (pos >= triggerPos) break
+                    val remaining = triggerPos - pos
+                    delay(if (remaining > 100L) 60L else 4L)
+                }
+
+                // Release the incoming song. If the user already paused, resume() will start it later.
                 if (_playbackState.value.isPlaying) nextP.start()
+                _playbackState.value = _playbackState.value.copy(isCrossfading = true)
+                if (plan.beatMatched) setTargetSpeed(nextIndex, plan.speedB)
 
                 var swapped = false
+                var lastCorrection = 0L
 
                 while (isActive) {
-                    val pos = try { currentP.currentPosition.toLong() } catch (e: Exception) { startPos + totalMs }
-                    val oldSongEnded = _playbackState.value.isPlaying &&
-                        try { !currentP.isPlaying } catch (e: Exception) { true }
+                    val pos = try { currentP.currentPosition.toLong() } catch (e: Exception) { plan.startAMs + plan.overlapMs }
+                    val playing = _playbackState.value.isPlaying
+                    val oldSongEnded = playing && try { !currentP.isPlaying } catch (e: Exception) { true }
 
                     val fraction = if (oldSongEnded) 1.0f
-                    else ((pos - startPos).toFloat() / totalMs).coerceIn(0.0f, 1.0f)
+                    else ((pos - plan.startAMs).toFloat() / plan.overlapMs).coerceIn(0.0f, 1.0f)
 
                     // Equal-power curve
                     val angle = fraction * (PI.toFloat() / 2f)
@@ -716,6 +741,23 @@ class AudioTransitionEngine(
                     val fadeInVol = sin(angle) * master
                     currentP.setVolume(fadeOutVol, fadeOutVol)
                     nextP.setVolume(fadeInVol, fadeInVol)
+
+                    // Keep the two beat grids locked: gently nudge the incoming speed if it drifts
+                    if (plan.beatMatched && playing && fraction < 1.0f) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastCorrection >= 500L) {
+                            lastCorrection = now
+                            val posB = try { nextP.currentPosition.toLong() } catch (e: Exception) { -1L }
+                            if (posB >= 0L) {
+                                val expectedB = plan.startBMs + (pos - plan.startAMs) * plan.speedB
+                                val err = posB - expectedB // > 0 means the incoming song is ahead
+                                val speed = if (abs(err) > 25f) {
+                                    plan.speedB * (1f + (-err / 2500f).coerceIn(-0.015f, 0.015f))
+                                } else plan.speedB
+                                setTargetSpeed(nextIndex, speed)
+                            }
+                        }
+                    }
 
                     if (!swapped && fraction >= 0.5f) {
                         swapped = true
@@ -726,7 +768,7 @@ class AudioTransitionEngine(
                     delay(40)
                 }
 
-                // Crossfade finished
+                // Blend finished
                 try { currentP.pause() } catch (e: Exception) { /* ignore */ }
                 try { currentP.reset() } catch (e: Exception) { /* ignore */ }
                 currentP.setVolume(1.0f, 1.0f)
@@ -737,11 +779,13 @@ class AudioTransitionEngine(
                 isPreparedB = false
                 preloadedSongId = null
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
+                if (plan.beatMatched) startSpeedRamp(nextIndex)
                 preloadNextTrack()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(tag, "Crossfade execution failed", e)
+                crossfadeFailedForId = currentSong.id
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
             }
         }
