@@ -105,15 +105,22 @@ class AudioTransitionEngine(
     // Without this flag the app resumed by itself even after the user had paused it.
     private var resumeOnFocusGain = false
 
+    private var focusResumeJob: Job? = null
+
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS -> {
+                // Another app (video feed, voice player...) took focus for good. Remember whether WE
+                // were playing, pause, then wait until that app is finished and come back by ourselves.
                 hasAudioFocus = false
-                resumeOnFocusGain = false
+                val wasPlaying = _playbackState.value.isPlaying || resumeOnFocusGain
+                resumeOnFocusGain = wasPlaying
                 pauseInternal()
+                if (wasPlaying) startWaitingToResume()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                resumeOnFocusGain = _playbackState.value.isPlaying
+                // "|| resumeOnFocusGain": a 2nd loss while already paused must not forget the 1st
+                resumeOnFocusGain = _playbackState.value.isPlaying || resumeOnFocusGain
                 pauseInternal()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -128,7 +135,34 @@ class AudioTransitionEngine(
                     resumeOnFocusGain = false
                     resume()
                 }
-                resumeOnFocusGain = false
+            }
+        }
+    }
+
+    /**
+     * After a PERMANENT focus loss Android never tells us when the other app is done.
+     * So we watch for it: once no other music is playing (and no call is active) for ~1.5s,
+     * we take focus back and resume. Cancelled by any user action (pause / play / new song).
+     */
+    private fun startWaitingToResume() {
+        focusResumeJob?.cancel()
+        focusResumeJob = engineScope.launch {
+            val am = audioManager ?: return@launch
+            val deadline = SystemClock.elapsedRealtime() + 30 * 60_000L
+            var quietChecks = 0
+            while (isActive && resumeOnFocusGain && SystemClock.elapsedRealtime() < deadline) {
+                delay(500)
+                val otherBusy = am.isMusicActive || am.mode != AudioManager.MODE_NORMAL
+                quietChecks = if (otherBusy) 0 else quietChecks + 1
+                if (quietChecks >= 3) {
+                    if (resumeOnFocusGain && !_playbackState.value.isPlaying &&
+                        _playbackState.value.currentSong != null
+                    ) {
+                        resumeOnFocusGain = false
+                        resume()
+                    }
+                    break
+                }
             }
         }
     }
@@ -224,6 +258,8 @@ class AudioTransitionEngine(
     }
 
     fun playSong(song: Song, startPositionMs: Long = 0L) {
+        resumeOnFocusGain = false
+        focusResumeJob?.cancel()
         abortTransitions()
 
         engineScope.launch {
@@ -391,6 +427,7 @@ class AudioTransitionEngine(
         val player = activePlayer ?: return
         pauseAfterManual = false
         resumeOnFocusGain = false
+        focusResumeJob?.cancel()
         requestAudioFocus()
         try {
             if (!player.isPlaying) player.start()
@@ -409,6 +446,7 @@ class AudioTransitionEngine(
     /** User pause: also gives up audio focus so calls / voice assistants can't restart us. */
     fun pause() {
         resumeOnFocusGain = false
+        focusResumeJob?.cancel()
         pauseInternal()
         abandonAudioFocus()
     }
@@ -815,6 +853,7 @@ class AudioTransitionEngine(
     }
 
     fun release() {
+        focusResumeJob?.cancel()
         abandonAudioFocus()
         tickerJob?.cancel()
         abortTransitions()
