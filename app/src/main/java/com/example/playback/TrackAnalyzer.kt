@@ -12,6 +12,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
@@ -23,12 +24,15 @@ import kotlin.math.sqrt
  *
  * Beats happen at  anchorMs + k * periodMs  (k = any integer), in the song's own timeline.
  * confidence is "how much stronger the beats are than the average of the track" (noise scores ~2).
+ * barOffset says which of the 4 beats in a bar is the downbeat ("beat 1"): downbeats happen at
+ *   anchorMs + (barOffset + 4 * m) * periodMs.  -1 = unknown (the accents were too even to tell).
  */
 data class BeatInfo(
     val bpm: Double,
     val periodMs: Double,
     val anchorMs: Double,
-    val confidence: Double
+    val confidence: Double,
+    val barOffset: Int = -1
 )
 
 /**
@@ -36,8 +40,8 @@ data class BeatInfo(
  *
  *  - audibleStartMs / audibleEndMs : where the music really starts / stops (skips silent intro / outro).
  *                                    audibleEndMs = -1 when unknown.
- *  - head : beat grid measured in the first ~30 s  (used when the song is the INCOMING one)
- *  - tail : beat grid measured in the last  ~30 s  (used when the song is the OUTGOING one)
+ *  - head : beat grid measured in the first ~45 s  (used when the song is the INCOMING one)
+ *  - tail : beat grid measured in the last  ~45 s  (used when the song is the OUTGOING one)
  */
 data class TrackAnalysis(
     val audibleStartMs: Long,
@@ -64,7 +68,7 @@ class TrackAnalyzer(private val context: Context) {
         return decoded
     }
 
-    /** Blocking. Call from a background thread. Decodes ~30 s from each end of the file. */
+    /** Blocking. Call from a background thread. Decodes ~45 s from each end of the file. */
     @Synchronized
     fun analyze(song: Song): TrackAnalysis {
         cached(song)?.let { return it }
@@ -92,7 +96,7 @@ class TrackAnalyzer(private val context: Context) {
     }
 
     // ------------------------------------------------------------------
-    // Decoding one window (first / last 30 s) -> audible bounds + energy envelope
+    // Decoding one window (first / last 45 s) -> audible bounds + energy envelope
     // ------------------------------------------------------------------
 
     private class Scan(
@@ -268,13 +272,13 @@ class TrackAnalyzer(private val context: Context) {
     // ------------------------------------------------------------------
 
     private fun encodeBeat(b: BeatInfo?) =
-        if (b == null) "-" else "${b.bpm},${b.periodMs},${b.anchorMs},${b.confidence}"
+        if (b == null) "-" else "${b.bpm},${b.periodMs},${b.anchorMs},${b.confidence},${b.barOffset}"
 
     private fun decodeBeat(s: String): BeatInfo? {
         if (s == "-") return null
         val p = s.split(",")
-        if (p.size != 4) return null
-        return BeatInfo(p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), p[3].toDouble())
+        if (p.size != 5) return null
+        return BeatInfo(p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), p[3].toDouble(), p[4].toInt())
     }
 
     private fun encode(a: TrackAnalysis) =
@@ -290,9 +294,9 @@ class TrackAnalyzer(private val context: Context) {
 
     companion object {
         /** Bump when the algorithm changes so old cached results are ignored. */
-        private const val VERSION = 2
-        private const val WINDOW_MS = 30_000L
-        private const val REGION_MS = 20_000.0
+        private const val VERSION = 3
+        private const val WINDOW_MS = 45_000L   // longer window = steadier tempo estimate
+        private const val REGION_MS = 28_000.0
         private const val HOP_SECONDS = 0.010
         private const val LOW_BAND_HZ = 150.0
         private const val MAX_HOPS = 6_000
@@ -375,13 +379,50 @@ internal object BeatDetector {
         val re = (regionEndMs - envStartMs) / hopMs
         val anchorHops = localAnchor(s, n, bestP, rs, re) ?: bestPhi
 
+        val bar = barOffset(s, n, bestP, anchorHops, rs, re)
+
         val periodMs = bestP * hopMs
         return BeatInfo(
             bpm = 60000.0 / periodMs,
             periodMs = periodMs,
             anchorMs = envStartMs + anchorHops * hopMs,
-            confidence = bestMean / (meanS + 1e-9)
+            confidence = bestMean / (meanS + 1e-9),
+            barOffset = bar
         )
+    }
+
+    /**
+     * Which of the 4 beats of a bar is "beat 1"? The downbeat usually carries the strongest attack
+     * (kick + bass / chord change). Average the onset strength on every 4th beat inside the mix
+     * region and take the strongest phase. If no phase clearly wins (e.g. a flat four-on-the-floor
+     * kick) we return -1 and the planner just aligns on beats instead of bars.
+     * Returns j in 0..3 meaning: the beat at (anchor + j * period) is a downbeat.
+     */
+    private fun barOffset(s: FloatArray, n: Int, p: Double, anchor: Double, rs: Double, re: Double): Int {
+        if (p <= 0.0 || re - rs < 12 * p) return -1
+        val sums = DoubleArray(4)
+        val cnts = IntArray(4)
+        var j = ceil((rs - anchor) / p).toInt()
+        var guard = 0
+        while (guard++ < 400) {
+            val t = anchor + j * p
+            if (t >= re) break
+            val idx = (t + 0.5).toInt()
+            if (idx in 1 until n - 1) {
+                val v = max(s[idx - 1], max(s[idx], s[idx + 1])).toDouble()
+                val slot = ((j % 4) + 4) % 4
+                sums[slot] += v
+                cnts[slot]++
+            }
+            j++
+        }
+        if (cnts.any { it < 3 }) return -1
+        val means = DoubleArray(4) { sums[it] / cnts[it] }
+        var best = 0
+        for (i in 1 until 4) if (means[i] > means[best]) best = i
+        var second = -1.0
+        for (i in 0 until 4) if (i != best && means[i] > second) second = means[i]
+        return if (means[best] > 1e-9 && means[best] >= 1.25 * second) best else -1
     }
 
     private fun prior(bpm: Double): Double {
