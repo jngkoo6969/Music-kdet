@@ -1,0 +1,6 @@
+{
+  "name": "Sip Shop Manager",
+  "description": "Standalone offline POS, inventory management, drink customization, and sales analytics for drink shops.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
