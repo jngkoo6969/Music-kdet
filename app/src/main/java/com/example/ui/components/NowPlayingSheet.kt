@@ -350,7 +350,7 @@ fun NowPlayingSheet(
                         style = MaterialTheme.typography.bodyLarge.copy(
                             color = AppleMusicRed,
                             fontWeight = FontWeight.Normal,
-                            fontSize = 15.sp
+                            fontSize = 17.sp
                         ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
