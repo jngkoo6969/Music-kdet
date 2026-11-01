@@ -294,6 +294,23 @@ class PlaybackManager private constructor(private val context: Context) {
         if (_queue.value.isEmpty() && playbackState.value.currentSong?.id == songId) {
             engine.pause()
         }
+        forgetSongInSavedSession(songId)
+    }
+
+    /** Removes a deleted song from the saved "last session" so it is not remembered after the app is cleared. */
+    private fun forgetSongInSavedSession(songId: Long) {
+        fun clean(key: String): String =
+            (prefs.getString(key, "") ?: "").split(",")
+                .filter { it.isNotBlank() && it != songId.toString() }
+                .joinToString(",")
+        val e = prefs.edit()
+            .putString("queue_ids", clean("queue_ids"))
+            .putString("original_ids", clean("original_ids"))
+        if (prefs.getLong("current_id", -1L) == songId) {
+            e.remove("current_id").remove("index").putLong("position_ms", 0L)
+        }
+        e.apply()
+        lastSavedQueueKey = ""
     }
 
     fun reorderQueue(fromIndex: Int, toIndex: Int) {
