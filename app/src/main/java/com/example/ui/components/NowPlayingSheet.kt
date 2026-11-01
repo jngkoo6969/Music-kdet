@@ -195,9 +195,13 @@ fun NowPlayingSheet(
             // Full-screen artwork / lyrics / queue area (Apple Music style)
             Box(
                 modifier = Modifier
-                    // 55/45 split (ART_FRACTION); lyrics/queue keep the taller area.
-                    .weight(if (isLyricsViewVisible || isQueueViewVisible) 3f else ART_FRACTION)
+                    
                     .fillMaxWidth()
+                    .then(
+                        // Artwork mode: a true 1:1 square. Lyrics/queue keep the taller area.
+                        if (isLyricsViewVisible || isQueueViewVisible) Modifier.weight(3f)
+                        else Modifier.aspectRatio(1f)
+                    )
                     .onSizeChanged { artworkHeightPx = it.height }
             ) {
                 when {
@@ -313,7 +317,7 @@ fun NowPlayingSheet(
                 }
             }
 
-            Box(modifier = Modifier.weight(if (isLyricsViewVisible || isQueueViewVisible) 2f else 1f - ART_FRACTION).fillMaxWidth()) {
+            Box(modifier = Modifier.weight(if (isLyricsViewVisible || isQueueViewVisible) 2f else 1f).fillMaxWidth()) {
             // Lower half: flipped, stretched, progressively blurred copy of the art's bottom
             if (!isLyricsViewVisible && !isQueueViewVisible && artworkHeightPx > 0) {
                 AlbumReflection(
