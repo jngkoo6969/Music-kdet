@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -18,7 +17,6 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -37,7 +35,6 @@ import androidx.compose.ui.unit.dp
  */
 const val ART_FRACTION = 0.55f // 55 / 45 split: art on top, controls below
 private const val OVERLAP_FRACTION = 0.14f
-private const val SLICE_FRACTION = 0.30f
 private const val ART_FADE_MS = 900
 
 private val TINT = Color(10, 10, 14)
@@ -52,31 +49,28 @@ private fun alphaMask(vararg stops: Pair<Float, Float>): Brush =
 
 // ---- Masks: sharp art ------------------------------------------------------
 private val ART_FADE = alphaMask(
-    0f to 1f, 0.66f to 1f, 0.75f to 0.85f, 0.84f to 0.55f,
-    0.92f to 0.25f, 0.97f to 0.07f, 1f to 0f
+    0f to 1f, 0.80f to 1f, 0.87f to 0.80f, 0.93f to 0.50f,
+    0.97f to 0.20f, 1f to 0f
 )
 
 private class BlurStep(val radius: Dp, val mask: Brush)
 
 // Progressive blur ON the art (like .ob1 .ob2 .ob3)
 private val ART_BLUR_STEPS = listOf(
-    BlurStep(3.dp, alphaMask(0f to 0f, 0.46f to 0f, 0.64f to 1f, 1f to 1f)),
-    BlurStep(8.dp, alphaMask(0f to 0f, 0.62f to 0f, 0.80f to 1f, 1f to 1f)),
-    BlurStep(16.dp, alphaMask(0f to 0f, 0.76f to 0f, 0.92f to 1f, 1f to 1f)),
-    BlurStep(28.dp, alphaMask(0f to 0f, 0.86f to 0f, 0.98f to 1f, 1f to 1f))
+    BlurStep(3.dp, alphaMask(0f to 0f, 0.74f to 0f, 0.86f to 1f, 1f to 1f)),
+    BlurStep(8.dp, alphaMask(0f to 0f, 0.82f to 0f, 0.92f to 1f, 1f to 1f)),
+    BlurStep(16.dp, alphaMask(0f to 0f, 0.88f to 0f, 0.96f to 1f, 1f to 1f)),
+    BlurStep(28.dp, alphaMask(0f to 0f, 0.93f to 0f, 0.99f to 1f, 1f to 1f))
 )
 
 // Progressive blur in the lower half (like .l1 .l2 .l3 .l4)
 private val REFLECTION_BLUR_STEPS = listOf(
-    BlurStep(10.dp, alphaMask(0f to 1f, 0.20f to 1f, 0.40f to 0f, 1f to 0f)),
-    BlurStep(24.dp, alphaMask(0f to 0f, 0.15f to 0f, 0.35f to 1f, 0.42f to 1f, 0.60f to 0f, 1f to 0f)),
-    BlurStep(44.dp, alphaMask(0f to 0f, 0.35f to 0f, 0.55f to 1f, 0.62f to 1f, 0.80f to 0f, 1f to 0f)),
-    BlurStep(64.dp, alphaMask(0f to 0f, 0.55f to 0f, 0.80f to 1f, 1f to 1f))
+    BlurStep(56.dp, alphaMask(0f to 1f, 1f to 1f))
 )
 
 // Fade-in of the whole lower half (the .reflection mask)
 private val REFLECTION_FADE_IN = alphaMask(
-    0f to 0f, 0.10f to 0.45f, 0.22f to 0.80f, 0.38f to 0.96f, 0.55f to 1f, 1f to 1f
+    0f to 0f, 0.12f to 0.50f, 0.30f to 0.90f, 0.50f to 1f, 1f to 1f
 )
 
 // Soft darkening toward the bottom (the .reflection::after tint)
@@ -131,7 +125,7 @@ fun AlbumArtTop(
 }
 
 // =============================================================================
-// BOTTOM: flipped, stretched, heavily blurred copy of the art's bottom slice
+// BOTTOM: heavily blurred, darkened copy of the art
 // =============================================================================
 /**
  * Place this inside the controls area (the box that starts where the sharp art ends).
@@ -148,8 +142,6 @@ fun AlbumReflection(
     val screenHeight = artHeight / ART_FRACTION
     val overlap = screenHeight * OVERLAP_FRACTION
     val reflectionHeight = screenHeight * (1f - ART_FRACTION + OVERLAP_FRACTION)
-    // How much the art slice is stretched vertically to fill the lower half (CSS --k)
-    val stretch = reflectionHeight / (artHeight * SLICE_FRACTION)
 
     Box(
         modifier = modifier
@@ -169,20 +161,18 @@ fun AlbumReflection(
     ) {
         if (canBlur) {
             REFLECTION_BLUR_STEPS.forEach { step ->
-                FlippedArtLayer(artworkUri, artHeight, stretch, step.radius, step.mask, 1f)
+                BlurredArtLayer(artworkUri, step.radius, step.mask, 1f)
             }
         } else {
             // No blur support below API 31: one soft, faded copy instead.
-            FlippedArtLayer(artworkUri, artHeight, stretch, 0.dp, alphaMask(0f to 1f, 1f to 1f), 0.45f)
+            BlurredArtLayer(artworkUri, 0.dp, alphaMask(0f to 1f, 1f to 1f), 0.45f)
         }
     }
 }
 
 @Composable
-private fun FlippedArtLayer(
+private fun BlurredArtLayer(
     artworkUri: String?,
-    artHeight: Dp,
-    stretch: Float,
     blurRadius: Dp,
     mask: Brush,
     alpha: Float
@@ -192,28 +182,14 @@ private fun FlippedArtLayer(
         modifier = Modifier
             .fillMaxSize()
             .alphaMasked(mask)
+            .graphicsLayer { this.alpha = alpha }
             .then(blurModifier)
     ) {
-        // A full-size copy of the art, placed so its BOTTOM edge sits on the top of this box,
-        // then mirrored (scaleY < 0) around that edge and stretched downward.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .requiredHeight(artHeight)
-                .align(Alignment.TopStart)
-                .offset(y = -artHeight)
-                .graphicsLayer {
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                    scaleY = -stretch
-                    this.alpha = alpha
-                }
-        ) {
-            ArtworkView(
-                artworkUri = artworkUri,
-                modifier = Modifier.fillMaxSize(),
-                cornerRadius = 0.dp,
-                fadeMillis = ART_FADE_MS
-            )
-        }
+        ArtworkView(
+            artworkUri = artworkUri,
+            modifier = Modifier.fillMaxSize(),
+            cornerRadius = 0.dp,
+            fadeMillis = ART_FADE_MS
+        )
     }
 }
