@@ -330,7 +330,24 @@ class MusicPlaybackService : Service() {
         return cachedArtwork
     }
 
-    private fun loadArtworkBitmap(artworkUriString: String?): Bitmap? {
+    /** Lock screen / notification artwork is shown as a 1:1 square (centre crop). */
+    private fun toSquare(src: Bitmap?): Bitmap? {
+        if (src == null) return null
+        val size = minOf(src.width, src.height)
+        if (size <= 0) return src
+        var out: Bitmap = src
+        if (src.width != src.height) {
+            out = Bitmap.createBitmap(src, (src.width - size) / 2, (src.height - size) / 2, size, size)
+        }
+        if (out.width > 1024) {
+            out = Bitmap.createScaledBitmap(out, 1024, 1024, true)
+        }
+        return out
+    }
+
+    private fun loadArtworkBitmap(artworkUriString: String?): Bitmap? = toSquare(decodeArtworkBitmap(artworkUriString))
+
+    private fun decodeArtworkBitmap(artworkUriString: String?): Bitmap? {
         if (artworkUriString.isNullOrBlank()) return null
         return try {
             if (artworkUriString.startsWith("/")) {
