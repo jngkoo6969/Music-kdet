@@ -52,25 +52,26 @@ private fun alphaMask(vararg stops: Pair<Float, Float>): Brush =
 
 // ---- Masks: sharp art ------------------------------------------------------
 private val ART_FADE = alphaMask(
-    0f to 1f, 0.58f to 1f, 0.68f to 0.85f, 0.79f to 0.55f,
-    0.89f to 0.25f, 0.96f to 0.07f, 1f to 0f
+    0f to 1f, 0.66f to 1f, 0.75f to 0.85f, 0.84f to 0.55f,
+    0.92f to 0.25f, 0.97f to 0.07f, 1f to 0f
 )
 
 private class BlurStep(val radius: Dp, val mask: Brush)
 
 // Progressive blur ON the art (like .ob1 .ob2 .ob3)
 private val ART_BLUR_STEPS = listOf(
-    BlurStep(1.5.dp, alphaMask(0f to 0f, 0.38f to 0f, 0.58f to 1f, 1f to 1f)),
-    BlurStep(4.dp, alphaMask(0f to 0f, 0.56f to 0f, 0.76f to 1f, 1f to 1f)),
-    BlurStep(9.dp, alphaMask(0f to 0f, 0.74f to 0f, 0.94f to 1f, 1f to 1f))
+    BlurStep(3.dp, alphaMask(0f to 0f, 0.46f to 0f, 0.64f to 1f, 1f to 1f)),
+    BlurStep(8.dp, alphaMask(0f to 0f, 0.62f to 0f, 0.80f to 1f, 1f to 1f)),
+    BlurStep(16.dp, alphaMask(0f to 0f, 0.76f to 0f, 0.92f to 1f, 1f to 1f)),
+    BlurStep(28.dp, alphaMask(0f to 0f, 0.86f to 0f, 0.98f to 1f, 1f to 1f))
 )
 
 // Progressive blur in the lower half (like .l1 .l2 .l3 .l4)
 private val REFLECTION_BLUR_STEPS = listOf(
-    BlurStep(6.dp, alphaMask(0f to 1f, 0.20f to 1f, 0.40f to 0f, 1f to 0f)),
-    BlurStep(16.dp, alphaMask(0f to 0f, 0.15f to 0f, 0.35f to 1f, 0.42f to 1f, 0.60f to 0f, 1f to 0f)),
-    BlurStep(30.dp, alphaMask(0f to 0f, 0.35f to 0f, 0.55f to 1f, 0.62f to 1f, 0.80f to 0f, 1f to 0f)),
-    BlurStep(46.dp, alphaMask(0f to 0f, 0.55f to 0f, 0.80f to 1f, 1f to 1f))
+    BlurStep(10.dp, alphaMask(0f to 1f, 0.20f to 1f, 0.40f to 0f, 1f to 0f)),
+    BlurStep(24.dp, alphaMask(0f to 0f, 0.15f to 0f, 0.35f to 1f, 0.42f to 1f, 0.60f to 0f, 1f to 0f)),
+    BlurStep(44.dp, alphaMask(0f to 0f, 0.35f to 0f, 0.55f to 1f, 0.62f to 1f, 0.80f to 0f, 1f to 0f)),
+    BlurStep(64.dp, alphaMask(0f to 0f, 0.55f to 0f, 0.80f to 1f, 1f to 1f))
 )
 
 // Fade-in of the whole lower half (the .reflection mask)
