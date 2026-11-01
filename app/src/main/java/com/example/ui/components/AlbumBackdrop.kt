@@ -28,13 +28,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import java.io.File
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -51,6 +54,9 @@ import kotlinx.coroutines.withContext
  *   SLICE_FRACTION    = --slice (30 %)  part of the art (from its bottom) used for the blur
  */
 const val ART_FRACTION = 0.58f // art on top (a bit taller so its fade ends right above the title)
+// Where the picture (and its fade) ends, as a fraction of the screen height.
+// Layout of the controls still uses ART_FRACTION, so text does not move.
+private const val IMAGE_END_FRACTION = 0.63f
 private const val OVERLAP_FRACTION = 0.10f
 private const val ART_FADE_MS = 900
 
@@ -82,7 +88,7 @@ private val ART_BLUR_STEPS = listOf(
 
 // Fade-in of the colour overlay (reaches full strength where the art ends)
 private val OVERLAP_IN_REFLECTION =
-    OVERLAP_FRACTION / (1f - ART_FRACTION + OVERLAP_FRACTION)
+    OVERLAP_FRACTION / (1f - IMAGE_END_FRACTION + OVERLAP_FRACTION)
 
 private val REFLECTION_FADE_IN = alphaMask(
     0f to 0f,
@@ -112,7 +118,16 @@ fun AlbumArtTop(
     artworkUri: String?,
     modifier: Modifier = Modifier
 ) {
-    Box(modifier = modifier.alphaMasked(ART_FADE)) {
+    Box(
+        modifier = modifier
+            .layout { measurable, constraints ->
+                // keep the layout size, but draw the picture down to IMAGE_END_FRACTION
+                val h = (constraints.maxHeight * IMAGE_END_FRACTION / ART_FRACTION).roundToInt()
+                val placeable = measurable.measure(Constraints.fixed(constraints.maxWidth, h))
+                layout(constraints.maxWidth, constraints.maxHeight) { placeable.placeRelative(0, 0) }
+            }
+            .alphaMasked(ART_FADE)
+    ) {
         ArtworkView(
             artworkUri = artworkUri,
             modifier = Modifier.fillMaxSize(),
@@ -205,7 +220,9 @@ fun AlbumReflection(
 ) {
     val screenHeight = artHeight / ART_FRACTION
     val overlap = screenHeight * OVERLAP_FRACTION
-    val reflectionHeight = screenHeight * (1f - ART_FRACTION + OVERLAP_FRACTION)
+    // the picture ends at IMAGE_END_FRACTION; the colour must be solid exactly there
+    val extra = screenHeight * (IMAGE_END_FRACTION - ART_FRACTION)
+    val reflectionHeight = screenHeight * (1f - IMAGE_END_FRACTION + OVERLAP_FRACTION)
     val base = rememberArtworkColor(artworkUri)
     val deeper = Color(base.red * 0.78f, base.green * 0.78f, base.blue * 0.78f)
 
@@ -214,7 +231,7 @@ fun AlbumReflection(
             .fillMaxWidth()
             .wrapContentHeight(Alignment.Top, unbounded = true)
             .height(reflectionHeight)
-            .offset(y = -overlap)
+            .offset(y = extra - overlap)
             .clipToBounds()
             .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
             .drawWithContent {
