@@ -50,8 +50,8 @@ import kotlinx.coroutines.withContext
  *   OVERLAP_FRACTION  = --On    (14 %)  how far the blurred half tucks up under the art
  *   SLICE_FRACTION    = --slice (30 %)  part of the art (from its bottom) used for the blur
  */
-const val ART_FRACTION = 0.55f // 55 / 45 split: art on top, controls below
-private const val OVERLAP_FRACTION = 0.14f
+const val ART_FRACTION = 0.58f // art on top (a bit taller so its fade ends right above the title)
+private const val OVERLAP_FRACTION = 0.10f
 private const val ART_FADE_MS = 900
 
 private val TINT = Color(10, 10, 14)
@@ -81,8 +81,16 @@ private val ART_BLUR_STEPS = listOf(
 )
 
 // Fade-in of the colour overlay (reaches full strength where the art ends)
+private val OVERLAP_IN_REFLECTION =
+    OVERLAP_FRACTION / (1f - ART_FRACTION + OVERLAP_FRACTION)
+
 private val REFLECTION_FADE_IN = alphaMask(
-    0f to 0f, 0.07f to 0.25f, 0.14f to 0.60f, 0.20f to 0.88f, 0.24f to 1f, 1f to 1f
+    0f to 0f,
+    OVERLAP_IN_REFLECTION * 0.30f to 0.25f,
+    OVERLAP_IN_REFLECTION * 0.60f to 0.60f,
+    OVERLAP_IN_REFLECTION * 0.85f to 0.88f,
+    OVERLAP_IN_REFLECTION to 1f,
+    1f to 1f
 )
 
 private val canBlur: Boolean get() = Build.VERSION.SDK_INT >= 31
