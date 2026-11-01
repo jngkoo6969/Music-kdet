@@ -20,12 +20,18 @@ import android.os.IBinder
 import android.os.SystemClock
 import com.example.MainActivity
 import com.example.R
+import com.example.data.MusicDatabase
 import com.example.data.Song
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -55,6 +61,12 @@ class MusicPlaybackService : Service() {
     private var lastReportedAt = 0L
     private var cachedArtwork: Bitmap? = null
     private var cachedArtworkSongId = -1L
+    private var cachedArtworkUri: String? = null
+
+    // Freshest copy of the current song from the database (artwork / metadata edits)
+    private var liveSong: Song? = null
+    private var lastShownSong: Song? = null
+    private var observeSongJob: Job? = null
 
     private val manager: PlaybackManager
         get() = PlaybackManager.getInstance(applicationContext)
@@ -139,17 +151,46 @@ class MusicPlaybackService : Service() {
         return START_NOT_STICKY
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     private fun startObserving() {
-        if (observeJob?.isActive == true) return
-        observeJob = scope.launch {
-            manager.playbackState.collect { refresh(force = false) }
+        if (observeJob?.isActive != true) {
+            observeJob = scope.launch {
+                manager.playbackState.collect { refresh(force = false) }
+            }
+        }
+        // When the artwork / title / artist / album of the playing song is edited in the app,
+        // push the change to the notification, lock screen and media controls too.
+        if (observeSongJob?.isActive != true) {
+            observeSongJob = scope.launch {
+                manager.playbackState
+                    .map { it.currentSong?.id }
+                    .distinctUntilChanged()
+                    .flatMapLatest { id ->
+                        if (id == null) emptyFlow<Song?>()
+                        else MusicDatabase.getInstance(applicationContext).songDao().getSongById(id)
+                    }
+                    .collect { fresh ->
+                        if (fresh == null) return@collect
+                        liveSong = fresh
+                        val shown = lastShownSong
+                        val changed = shown == null || shown.id != fresh.id ||
+                            shown.artworkUri != fresh.artworkUri ||
+                            shown.title != fresh.title ||
+                            shown.artist != fresh.artist ||
+                            shown.album != fresh.album
+                        if (changed) refresh(force = true)
+                    }
+            }
         }
     }
 
     /** Pushes the current state to the MediaSession and the notification when needed. */
     private fun refresh(force: Boolean) {
         val state = manager.playbackState.value
-        val song = state.currentSong ?: return
+        val stateSong = state.currentSong ?: return
+        // Prefer the database copy so edited artwork/metadata show up right away
+        val song = liveSong?.takeIf { it.id == stateSong.id } ?: stateSong
+        lastShownSong = song
 
         val expectedPos = if (lastPlaying == true)
             lastReportedPos + (SystemClock.elapsedRealtime() - lastReportedAt) else lastReportedPos
@@ -282,9 +323,10 @@ class MusicPlaybackService : Service() {
     }
 
     private fun artworkFor(song: Song): Bitmap? {
-        if (cachedArtworkSongId == song.id) return cachedArtwork
+        if (cachedArtworkSongId == song.id && cachedArtworkUri == song.artworkUri) return cachedArtwork
         cachedArtwork = loadArtworkBitmap(song.artworkUri)
         cachedArtworkSongId = song.id
+        cachedArtworkUri = song.artworkUri
         return cachedArtwork
     }
 
