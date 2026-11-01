@@ -36,6 +36,16 @@ class MusicRepository(
 ) {
     private val importer = AudioFileImporter(context)
 
+    // Remembers songs the user deleted, so the next device scan does not bring them back
+    private val libraryPrefs by lazy { context.getSharedPreferences("library_prefs", Context.MODE_PRIVATE) }
+
+    private fun deletedUris(): Set<String> =
+        libraryPrefs.getStringSet("deleted_uris", emptySet())?.toSet() ?: emptySet()
+
+    private fun rememberDeleted(uri: String) {
+        libraryPrefs.edit().putStringSet("deleted_uris", deletedUris() + uri).apply()
+    }
+
     val allSongs: Flow<List<Song>> = songDao.getAllSongs()
     val favoriteSongs: Flow<List<Song>> = songDao.getFavoriteSongs()
     val recentlyPlayedSongs: Flow<List<Song>> = songDao.getRecentlyPlayedSongs()
@@ -126,7 +136,8 @@ class MusicRepository(
     }
 
     suspend fun scanDeviceMusic(): Int = withContext(Dispatchers.IO) {
-        val scanned = importer.scanDeviceMediaStore()
+        val deleted = deletedUris()
+        val scanned = importer.scanDeviceMediaStore().filter { it.uriString !in deleted }
         if (scanned.isNotEmpty()) {
             val existing = songDao.getAllSongs().first()
             val existingByUri = existing.associateBy { it.uriString }
@@ -180,6 +191,7 @@ class MusicRepository(
 
     suspend fun deleteSong(song: Song) = withContext(Dispatchers.IO) {
         songDao.deleteSong(song)
+        rememberDeleted(song.uriString)
         // Only delete files the app imported itself (inside app storage). Songs found on the
         // phone's storage are just removed from the library, never erased.
         if (song.filePath != null) {
@@ -198,7 +210,10 @@ class MusicRepository(
      * Initializes beautiful offline starter tracks if the library is empty.
      */
     suspend fun ensureDemoTracksIfEmpty() = withContext(Dispatchers.IO) {
+        // Starter tracks are created only once, never again after the user deletes them
+        if (libraryPrefs.getBoolean("demo_seeded", false)) return@withContext
         val existing = songDao.getAllSongs().first()
+        libraryPrefs.edit().putBoolean("demo_seeded", true).apply()
         if (existing.isNotEmpty()) return@withContext
 
         val demoDir = File(context.filesDir, "demo_tracks").apply { mkdirs() }
