@@ -1,14 +1,24 @@
 package com.example.ui.components
 
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -18,26 +28,32 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import java.io.FileInputStream
+import java.io.InputStream
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /*
- * Album background style (ported from the HTML demo).
+ * Album background style (Apple Music look):
  *
- *  - TOP    : sharp album art that dissolves with a progressive blur.
- *  - BOTTOM : the bottom slice of the art, flipped + stretched, heavily blurred
- *             (4 progressive layers), darkened, and faded in under the art.
+ *  - TOP    : the album art. It is drawn down to IMAGE_END_FRACTION of the screen height
+ *             (the line, just above the artist name). Only its lower edge gets a soft blur.
+ *  - BOTTOM : one smooth colour taken from the art itself, faded in over the lower part of
+ *             the art and solid exactly at the line, so the picture melts into the controls.
  *
- * Screen fractions (same names as the CSS variables):
- *   ART_FRACTION      = --Hn    (55 %)  sharp art height
- *   OVERLAP_FRACTION  = --On    (14 %)  how far the blurred half tucks up under the art
- *   SLICE_FRACTION    = --slice (30 %)  part of the art (from its bottom) used for the blur
+ * ART_FRACTION is the layout split used by NowPlayingSheet (so the text stays where it is).
+ * IMAGE_END_FRACTION is where the picture visually ends. Change it to move the line.
  */
-const val ART_FRACTION = 0.55f // 55 / 45 split: art on top, controls below
-private const val OVERLAP_FRACTION = 0.14f
-private const val SLICE_FRACTION = 0.30f
+const val ART_FRACTION = 0.58f
+private const val IMAGE_END_FRACTION = 0.63f
+private const val OVERLAP_FRACTION = 0.10f
 private const val ART_FADE_MS = 900
 
 private val TINT = Color(10, 10, 14)
@@ -50,46 +66,32 @@ private fun alphaMask(vararg stops: Pair<Float, Float>): Brush =
         }
     )
 
-// ---- Masks: sharp art ------------------------------------------------------
-private val ART_FADE = alphaMask(
-    0f to 1f, 0.58f to 1f, 0.68f to 0.85f, 0.79f to 0.55f,
-    0.89f to 0.25f, 0.96f to 0.07f, 1f to 0f
-)
-
 private class BlurStep(val radius: Dp, val mask: Brush)
 
-// Progressive blur ON the art (like .ob1 .ob2 .ob3)
+// Progressive blur ON the art, only near its bottom edge (the face stays sharp)
 private val ART_BLUR_STEPS = listOf(
-    BlurStep(1.5.dp, alphaMask(0f to 0f, 0.38f to 0f, 0.58f to 1f, 1f to 1f)),
-    BlurStep(4.dp, alphaMask(0f to 0f, 0.56f to 0f, 0.76f to 1f, 1f to 1f)),
-    BlurStep(9.dp, alphaMask(0f to 0f, 0.74f to 0f, 0.94f to 1f, 1f to 1f))
+    BlurStep(3.dp, alphaMask(0f to 0f, 0.74f to 0f, 0.86f to 1f, 1f to 1f)),
+    BlurStep(8.dp, alphaMask(0f to 0f, 0.82f to 0f, 0.92f to 1f, 1f to 1f)),
+    BlurStep(16.dp, alphaMask(0f to 0f, 0.88f to 0f, 0.96f to 1f, 1f to 1f)),
+    BlurStep(28.dp, alphaMask(0f to 0f, 0.93f to 0f, 0.99f to 1f, 1f to 1f))
 )
 
-// Progressive blur in the lower half (like .l1 .l2 .l3 .l4)
-private val REFLECTION_BLUR_STEPS = listOf(
-    BlurStep(6.dp, alphaMask(0f to 1f, 0.20f to 1f, 0.40f to 0f, 1f to 0f)),
-    BlurStep(16.dp, alphaMask(0f to 0f, 0.15f to 0f, 0.35f to 1f, 0.42f to 1f, 0.60f to 0f, 1f to 0f)),
-    BlurStep(30.dp, alphaMask(0f to 0f, 0.35f to 0f, 0.55f to 1f, 0.62f to 1f, 0.80f to 0f, 1f to 0f)),
-    BlurStep(46.dp, alphaMask(0f to 0f, 0.55f to 0f, 0.80f to 1f, 1f to 1f))
-)
+// Fade-in of the colour layer (reaches full strength exactly at the line)
+private val OVERLAP_IN_REFLECTION =
+    OVERLAP_FRACTION / (1f - IMAGE_END_FRACTION + OVERLAP_FRACTION)
 
-// Fade-in of the whole lower half (the .reflection mask)
 private val REFLECTION_FADE_IN = alphaMask(
-    0f to 0f, 0.10f to 0.45f, 0.22f to 0.80f, 0.38f to 0.96f, 0.55f to 1f, 1f to 1f
-)
-
-// Soft darkening toward the bottom (the .reflection::after tint)
-private val REFLECTION_TINT = Brush.verticalGradient(
-    colorStops = arrayOf(
-        0.00f to TINT.copy(alpha = 0f),
-        0.40f to TINT.copy(alpha = 0.22f),
-        1.00f to TINT.copy(alpha = 0.50f)
-    )
+    0f to 0f,
+    OVERLAP_IN_REFLECTION * 0.30f to 0.25f,
+    OVERLAP_IN_REFLECTION * 0.60f to 0.60f,
+    OVERLAP_IN_REFLECTION * 0.85f to 0.88f,
+    OVERLAP_IN_REFLECTION to 1f,
+    1f to 1f
 )
 
 private val canBlur: Boolean get() = Build.VERSION.SDK_INT >= 31
 
-/** Draws [content] into its own layer, then multiplies its alpha by [mask]. */
+/** Draws content into its own layer, then multiplies its alpha by [mask]. */
 private fun Modifier.alphaMasked(mask: Brush): Modifier =
     this
         .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
@@ -99,21 +101,28 @@ private fun Modifier.alphaMasked(mask: Brush): Modifier =
         }
 
 // =============================================================================
-// TOP: sharp art + progressive blur that dissolves into the lower half
+// TOP: album art, drawn down to the line, soft blur on its lower edge
 // =============================================================================
 @Composable
 fun AlbumArtTop(
     artworkUri: String?,
     modifier: Modifier = Modifier
 ) {
-    Box(modifier = modifier.alphaMasked(ART_FADE)) {
+    Box(
+        modifier = modifier.layout { measurable, constraints ->
+            // keep the layout size, but draw the picture down to IMAGE_END_FRACTION
+            val h = (constraints.maxHeight * IMAGE_END_FRACTION / ART_FRACTION).roundToInt()
+            val placeable = measurable.measure(Constraints.fixed(constraints.maxWidth, h))
+            layout(constraints.maxWidth, constraints.maxHeight) { placeable.placeRelative(0, 0) }
+        }
+    ) {
         ArtworkView(
             artworkUri = artworkUri,
             modifier = Modifier.fillMaxSize(),
             cornerRadius = 0.dp,
             fadeMillis = ART_FADE_MS
         )
-        // Blur needs Android 12+ (API 31). Older phones just keep the sharp art + fade.
+        // Blur needs Android 12+ (API 31). Older phones just keep the sharp art.
         if (canBlur) {
             ART_BLUR_STEPS.forEach { step ->
                 Box(modifier = Modifier.fillMaxSize().alphaMasked(step.mask)) {
@@ -130,13 +139,104 @@ fun AlbumArtTop(
 }
 
 // =============================================================================
-// BOTTOM: flipped, stretched, heavily blurred copy of the art's bottom slice
+// BOTTOM: solid colour sampled from the art
 // =============================================================================
+
+private fun openArtwork(context: Context, uriString: String): InputStream? {
+    if (uriString.startsWith("/")) return FileInputStream(uriString)
+    val uri = Uri.parse(uriString)
+    if (uri.scheme == "file") {
+        val path = uri.path ?: return null
+        return FileInputStream(path)
+    }
+    return context.contentResolver.openInputStream(uri)
+}
+
+/** Average colour of the lower part of the art, toned down so white text stays readable. */
+private suspend fun sampleArtworkColor(context: Context, uriString: String?): Color {
+    if (uriString.isNullOrBlank()) return TINT
+    return withContext(Dispatchers.IO) {
+        try {
+            val bounds = BitmapFactory.Options()
+            bounds.inJustDecodeBounds = true
+            val s1 = openArtwork(context, uriString)
+            if (s1 != null) {
+                s1.use { BitmapFactory.decodeStream(it, null, bounds) }
+            }
+            var sample = 1
+            while (bounds.outWidth / sample > 96 && bounds.outHeight / sample > 96) sample *= 2
+
+            val opts = BitmapFactory.Options()
+            opts.inSampleSize = sample
+            val s2 = openArtwork(context, uriString)
+            val bmp = if (s2 != null) s2.use { BitmapFactory.decodeStream(it, null, opts) } else null
+            if (bmp == null) {
+                TINT
+            } else {
+                // average the bottom 40 % of the picture
+                val w = bmp.width
+                val h = bmp.height
+                var startY = (h * 0.6f).toInt()
+                if (startY > h - 1) startY = h - 1
+                if (startY < 0) startY = 0
+                var sumR = 0L
+                var sumG = 0L
+                var sumB = 0L
+                var count = 0L
+                for (y in startY until h) {
+                    for (x in 0 until w) {
+                        val px = bmp.getPixel(x, y)
+                        sumR += ((px shr 16) and 0xFF).toLong()
+                        sumG += ((px shr 8) and 0xFF).toLong()
+                        sumB += (px and 0xFF).toLong()
+                        count++
+                    }
+                }
+                if (count == 0L) {
+                    TINT
+                } else {
+                    var cr = sumR.toFloat() / 255f / count.toFloat()
+                    var cg = sumG.toFloat() / 255f / count.toFloat()
+                    var cb = sumB.toFloat() / 255f / count.toFloat()
+                    // keep it dark enough for white text, and never pitch black
+                    val lum = 0.2126f * cr + 0.7152f * cg + 0.0722f * cb
+                    val maxLum = 0.36f
+                    val minLum = 0.10f
+                    var k = 1f
+                    if (lum > maxLum) k = maxLum / lum
+                    else if (lum < minLum && lum > 0.001f) k = minLum / lum
+                    cr = (cr * k).coerceIn(0f, 1f)
+                    cg = (cg * k).coerceIn(0f, 1f)
+                    cb = (cb * k).coerceIn(0f, 1f)
+                    Color(red = cr, green = cg, blue = cb, alpha = 1f)
+                }
+            }
+        } catch (e: Exception) {
+            TINT
+        }
+    }
+}
+
+@Composable
+private fun rememberArtworkColor(artworkUri: String?): Color {
+    val context = LocalContext.current
+    var target by remember { mutableStateOf(TINT) }
+    LaunchedEffect(artworkUri) {
+        target = sampleArtworkColor(context, artworkUri)
+    }
+    val animated by animateColorAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = ART_FADE_MS),
+        label = "artwork_color"
+    )
+    return animated
+}
+
 /**
- * Place this inside the controls area (the box that starts where the sharp art ends).
- * It pulls itself up by OVERLAP_FRACTION so it tucks under the art.
+ * Place this inside the controls area (the box that starts where the layout split ends).
+ * It reaches up over the art's blurred bottom edge and is solid exactly at IMAGE_END_FRACTION.
  *
- * @param artHeight the measured height of the sharp art area (= ART_FRACTION of the screen)
+ * @param artHeight the measured height of the art area (= ART_FRACTION of the screen)
  */
 @Composable
 fun AlbumReflection(
@@ -146,73 +246,24 @@ fun AlbumReflection(
 ) {
     val screenHeight = artHeight / ART_FRACTION
     val overlap = screenHeight * OVERLAP_FRACTION
-    val reflectionHeight = screenHeight * (1f - ART_FRACTION + OVERLAP_FRACTION)
-    // How much the art slice is stretched vertically to fill the lower half (CSS --k)
-    val stretch = reflectionHeight / (artHeight * SLICE_FRACTION)
+    // the picture ends at IMAGE_END_FRACTION; the colour must be solid exactly there
+    val extra = screenHeight * (IMAGE_END_FRACTION - ART_FRACTION)
+    val reflectionHeight = screenHeight * (1f - IMAGE_END_FRACTION + OVERLAP_FRACTION)
+    val base = rememberArtworkColor(artworkUri)
+    val deeper = Color(red = base.red * 0.78f, green = base.green * 0.78f, blue = base.blue * 0.78f, alpha = 1f)
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .wrapContentHeight(Alignment.Top, unbounded = true)
             .height(reflectionHeight)
-            .offset(y = -overlap)
+            .offset(y = extra - overlap)
             .clipToBounds()
             .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
             .drawWithContent {
                 drawContent()
-                // brightness(.82)-style darkening, only where there is content
-                drawRect(Color.Black.copy(alpha = 0.18f), blendMode = BlendMode.SrcAtop)
-                drawRect(brush = REFLECTION_TINT)
                 drawRect(brush = REFLECTION_FADE_IN, blendMode = BlendMode.DstIn)
             }
-    ) {
-        if (canBlur) {
-            REFLECTION_BLUR_STEPS.forEach { step ->
-                FlippedArtLayer(artworkUri, artHeight, stretch, step.radius, step.mask, 1f)
-            }
-        } else {
-            // No blur support below API 31: one soft, faded copy instead.
-            FlippedArtLayer(artworkUri, artHeight, stretch, 0.dp, alphaMask(0f to 1f, 1f to 1f), 0.45f)
-        }
-    }
-}
-
-@Composable
-private fun FlippedArtLayer(
-    artworkUri: String?,
-    artHeight: Dp,
-    stretch: Float,
-    blurRadius: Dp,
-    mask: Brush,
-    alpha: Float
-) {
-    val blurModifier = if (blurRadius > 0.dp) Modifier.blur(blurRadius) else Modifier
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .alphaMasked(mask)
-            .then(blurModifier)
-    ) {
-        // A full-size copy of the art, placed so its BOTTOM edge sits on the top of this box,
-        // then mirrored (scaleY < 0) around that edge and stretched downward.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .requiredHeight(artHeight)
-                .align(Alignment.TopStart)
-                .offset(y = -artHeight)
-                .graphicsLayer {
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                    scaleY = -stretch
-                    this.alpha = alpha
-                }
-        ) {
-            ArtworkView(
-                artworkUri = artworkUri,
-                modifier = Modifier.fillMaxSize(),
-                cornerRadius = 0.dp,
-                fadeMillis = ART_FADE_MS
-            )
-        }
-    }
+            .background(Brush.verticalGradient(colors = listOf(base, base, deeper)))
+    )
 }
