@@ -249,8 +249,12 @@ fun MainAppScreen(viewModel: MusicViewModel) {
     val songPhotoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
-        if (uri != null && songForCustomArt != null) {
-            viewModel.applyCustomArtworkToSong(songForCustomArt!!, uri)
+        val target = songForCustomArt
+        if (uri != null && target != null) {
+            viewModel.applyCustomArtworkToSong(target, uri)
+        } else {
+            // Picker cancelled: reset so "Change Album Artwork" works again next time
+            viewModel.setSongForCustomArt(null)
         }
     }
 
