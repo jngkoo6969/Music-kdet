@@ -53,7 +53,7 @@ import kotlinx.coroutines.withContext
  */
 const val ART_FRACTION = 0.58f
 private const val IMAGE_END_FRACTION = 0.63f
-private const val OVERLAP_FRACTION = 0.10f
+private const val OVERLAP_FRACTION = 0.16f   // size of the blend zone (the "overlap")
 private const val ART_FADE_MS = 900
 
 private val TINT = Color(10, 10, 14)
@@ -68,23 +68,31 @@ private fun alphaMask(vararg stops: Pair<Float, Float>): Brush =
 
 private class BlurStep(val radius: Dp, val mask: Brush)
 
-// Progressive blur ON the art, only near its bottom edge (the face stays sharp)
+// Progressive blur ON the art. It grows through the same zone where the colour fades in,
+// so the photo softens as it melts into the colour (no hard band in the overlap).
 private val ART_BLUR_STEPS = listOf(
-    BlurStep(3.dp, alphaMask(0f to 0f, 0.74f to 0f, 0.86f to 1f, 1f to 1f)),
-    BlurStep(8.dp, alphaMask(0f to 0f, 0.82f to 0f, 0.92f to 1f, 1f to 1f)),
-    BlurStep(16.dp, alphaMask(0f to 0f, 0.88f to 0f, 0.96f to 1f, 1f to 1f)),
-    BlurStep(28.dp, alphaMask(0f to 0f, 0.93f to 0f, 0.99f to 1f, 1f to 1f))
+    BlurStep(3.dp, alphaMask(0f to 0f, 0.70f to 0f, 0.82f to 1f, 1f to 1f)),
+    BlurStep(8.dp, alphaMask(0f to 0f, 0.76f to 0f, 0.88f to 1f, 1f to 1f)),
+    BlurStep(16.dp, alphaMask(0f to 0f, 0.82f to 0f, 0.94f to 1f, 1f to 1f)),
+    BlurStep(28.dp, alphaMask(0f to 0f, 0.88f to 0f, 1f to 1f))
 )
 
-// Fade-in of the colour layer (reaches full strength exactly at the line)
+// Fade-in of the colour layer over the overlap zone. "Smoother-step" easing: it starts and ends
+// very gently, so there is no visible edge where the colour begins or where it becomes solid.
 private val OVERLAP_IN_REFLECTION =
     OVERLAP_FRACTION / (1f - IMAGE_END_FRACTION + OVERLAP_FRACTION)
 
 private val REFLECTION_FADE_IN = alphaMask(
     0f to 0f,
-    OVERLAP_IN_REFLECTION * 0.30f to 0.25f,
-    OVERLAP_IN_REFLECTION * 0.60f to 0.60f,
-    OVERLAP_IN_REFLECTION * 0.85f to 0.88f,
+    OVERLAP_IN_REFLECTION * 0.1f to 0.009f,
+    OVERLAP_IN_REFLECTION * 0.2f to 0.058f,
+    OVERLAP_IN_REFLECTION * 0.3f to 0.163f,
+    OVERLAP_IN_REFLECTION * 0.4f to 0.317f,
+    OVERLAP_IN_REFLECTION * 0.5f to 0.500f,
+    OVERLAP_IN_REFLECTION * 0.6f to 0.683f,
+    OVERLAP_IN_REFLECTION * 0.7f to 0.837f,
+    OVERLAP_IN_REFLECTION * 0.8f to 0.942f,
+    OVERLAP_IN_REFLECTION * 0.9f to 0.991f,
     OVERLAP_IN_REFLECTION to 1f,
     1f to 1f
 )
