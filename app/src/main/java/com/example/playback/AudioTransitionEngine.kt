@@ -28,6 +28,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -307,6 +309,13 @@ class AudioTransitionEngine(
      * Smoothly transitions to next/previous song with configurable manual fade duration.
      */
     fun transitionToSong(nextSong: Song, isNext: Boolean = true) {
+        // Automix is on: pressing Next / Previous blends into the new song instead of cutting to it.
+        val automixSec = _playbackState.value.crossfadeDurationSec
+        if (automixSec > 0 && _playbackState.value.isPlaying && activePlayer != null) {
+            automixSkipTo(nextSong, automixSec * 1000L)
+            return
+        }
+
         val manualFadeMs = _playbackState.value.manualFadeDurationMs
         if (manualFadeMs <= 0 || !_playbackState.value.isPlaying || activePlayer == null) {
             playSong(nextSong)
@@ -384,6 +393,83 @@ class AudioTransitionEngine(
             } catch (e: Exception) {
                 Log.e(tag, "Manual fade transition error, fallback to direct play", e)
                 manualPreSwap = false
+                playSong(nextSong)
+            }
+        }
+    }
+
+    /**
+     * Automix for a manual skip (Next / Previous / tapping a song): starts the new song at its first
+     * audible moment and blends it with the current song using an equal-power crossfade of the Automix
+     * length, starting right now from wherever the current song is. Progress follows the OUTGOING
+     * song's position, so pausing freezes the blend. Falls back to a direct play if anything fails.
+     */
+    private fun automixSkipTo(nextSong: Song, crossfadeMs: Long) {
+        abortTransitions()
+
+        val currentP = activePlayer ?: run { playSong(nextSong); return }
+        val nextP = standbyPlayer ?: run { playSong(nextSong); return }
+
+        crossfadeJob = engineScope.launch {
+            try {
+                // Prepare the new song silently, parked where its music actually starts
+                if (!(isPreparedB && preloadedSongId == nextSong.id)) {
+                    nextP.reset()
+                    setDataSource(nextP, nextSong)
+                    nextP.prepare()
+                }
+                isPreparedB = false
+                preloadedSongId = null
+                nextP.setVolume(0.0f, 0.0f)
+                val startB = analyzer.cached(nextSong)?.audibleStartMs?.takeIf { it in 150L..8_000L } ?: 0L
+                if (startB >= 20L) seekAndWait(nextP, startB)
+
+                val startPos = try { currentP.currentPosition.toLong() } catch (e: Exception) { 0L }
+                val durA = try { currentP.duration.toLong() } catch (e: Exception) { startPos }
+                // Never overlap longer than what is left of the current song
+                val overlapMs = min(crossfadeMs, max(300L, durA - startPos - 200L))
+
+                if (_playbackState.value.isPlaying) nextP.start()
+                _playbackState.value = _playbackState.value.copy(isCrossfading = true, errorMessage = null)
+
+                var swapped = false
+                while (isActive) {
+                    val pos = try { currentP.currentPosition.toLong() } catch (e: Exception) { startPos + overlapMs }
+                    val playing = _playbackState.value.isPlaying
+                    val oldSongEnded = playing && try { !currentP.isPlaying } catch (e: Exception) { true }
+
+                    val fraction = if (oldSongEnded) 1.0f
+                    else ((pos - startPos).toFloat() / overlapMs).coerceIn(0.0f, 1.0f)
+
+                    val angle = fraction * (PI.toFloat() / 2f)
+                    val master = _playbackState.value.volume
+                    currentP.setVolume(cos(angle) * master, cos(angle) * master)
+                    nextP.setVolume(sin(angle) * master, sin(angle) * master)
+
+                    // Title / artwork switch at the midpoint of the blend
+                    if (!swapped && fraction >= 0.5f) {
+                        swapped = true
+                        swapToNextSong(nextP, nextSong)
+                    }
+                    if (fraction >= 1.0f) break
+                    delay(40)
+                }
+
+                // Blend finished
+                try { currentP.pause() } catch (e: Exception) { /* ignore */ }
+                try { currentP.reset() } catch (e: Exception) { /* ignore */ }
+                currentP.setVolume(1.0f, 1.0f)
+                val master = _playbackState.value.volume
+                nextP.setVolume(master, master)
+                if (!swapped) swapToNextSong(nextP, nextSong)
+
+                _playbackState.value = _playbackState.value.copy(isCrossfading = false)
+                preloadNextTrack()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(tag, "Automix skip failed, falling back to direct play", e)
+                _playbackState.value = _playbackState.value.copy(isCrossfading = false)
                 playSong(nextSong)
             }
         }
