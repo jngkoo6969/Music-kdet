@@ -153,8 +153,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), PlaybackState())
 
-    val parsedLyrics: StateFlow<ParsedLyrics> = playbackState
-        .map { it.currentSong?.lyrics }
+    // Lyrics are read from the live library row (not the copy held by the player), so a
+    // freshly imported/edited lyric shows immediately without restarting the song.
+    val parsedLyrics: StateFlow<ParsedLyrics> = combine(
+        playbackState.map { it.currentSong }.distinctUntilChanged(),
+        repository.allSongs
+    ) { current, library ->
+        if (current == null) null
+        else (library.firstOrNull { it.id == current.id } ?: current).lyrics
+    }
         .distinctUntilChanged()
         .map { LyricsParser.parse(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ParsedLyrics(emptyList(), false))
@@ -282,7 +289,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     // Artwork & Metadata & Lyrics editing
     fun showEditMetadata(song: Song?) { _songToEditMetadata.value = song }
-    fun showEditLyrics(song: Song?) { _songToEditLyrics.value = song }
+    fun showEditLyrics(song: Song?) {
+        // Always edit the latest saved version of the song, not a stale player copy
+        _songToEditLyrics.value = song?.let { s -> allSongs.value.firstOrNull { it.id == s.id } ?: s }
+    }
     fun showAddToPlaylist(song: Song?) { _songToAddToPlaylist.value = song }
     fun setShowCreatePlaylist(show: Boolean) { _showCreatePlaylistDialog.value = show }
     fun setSongForCustomArt(song: Song?) { _songForCustomArt.value = song }
