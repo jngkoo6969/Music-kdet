@@ -248,6 +248,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         playbackManager.playQueue(targetQueue, index)
     }
 
+    /** Tap on a row in Playing Next: keep the queue as is, just jump to that song. */
+    fun playQueueIndex(index: Int) = playbackManager.playQueueIndex(index)
+
     fun playQueue(songs: List<Song>, startIndex: Int = 0) {
         playbackManager.playQueue(songs, startIndex)
     }
