@@ -560,9 +560,7 @@ fun MainAppScreen(viewModel: MusicViewModel) {
             onToggleLyricsView = { viewModel.toggleLyricsView() },
             onToggleQueueView = { viewModel.toggleQueueView() },
             onPlayTrackAt = { index ->
-                if (index in queue.indices) {
-                    viewModel.playSong(queue[index])
-                }
+                viewModel.playQueueIndex(index)
             },
             onRemoveFromQueue = { viewModel.removeFromQueue(it) },
             onClearQueue = { viewModel.clearQueue() },
