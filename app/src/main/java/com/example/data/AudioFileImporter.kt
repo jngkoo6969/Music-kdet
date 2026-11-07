@@ -227,9 +227,19 @@ class AudioFileImporter(private val context: Context) {
      */
     suspend fun readLyricsFromUri(uri: Uri): String? = withContext(Dispatchers.IO) {
         try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                input.bufferedReader().use { it.readText() }
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: return@withContext null
+            // Detect encoding from the byte-order mark (many .lrc files are UTF-16 or UTF-8 with BOM)
+            val text = when {
+                bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte() ->
+                    String(bytes, 3, bytes.size - 3, Charsets.UTF_8)
+                bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte() ->
+                    String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE)
+                bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte() ->
+                    String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
+                else -> String(bytes, Charsets.UTF_8)
             }
+            text.takeIf { it.isNotBlank() }
         } catch (e: Exception) {
             Log.e(tag, "Failed to read lyrics from Uri", e)
             null
