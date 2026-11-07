@@ -51,11 +51,11 @@ fun UpNextQueueView(
 ) {
     // Open already scrolled to the playing song, and follow it whenever it changes
     val listState = rememberLazyListState(
-        initialFirstVisibleItemIndex = (currentIndex - 1).coerceIn(0, (queue.size - 1).coerceAtLeast(0))
+        initialFirstVisibleItemIndex = currentIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
     )
     LaunchedEffect(currentIndex, queue.size) {
         if (currentIndex in queue.indices) {
-            listState.animateScrollToItem((currentIndex - 1).coerceAtLeast(0))
+            listState.animateScrollToItem(currentIndex)
         }
     }
 
