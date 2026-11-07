@@ -139,6 +139,15 @@ class PlaybackManager private constructor(private val context: Context) {
         engine.playSong(queueToSet[_currentIndex.value])
     }
 
+    /** Jump to a row of the CURRENT queue without rebuilding or reshuffling it. */
+    fun playQueueIndex(index: Int) {
+        val q = _queue.value
+        if (index !in q.indices) return
+        _currentIndex.value = index
+        startServiceIfNeeded()
+        engine.transitionToSong(q[index], isNext = true)
+    }
+
     fun playSong(song: Song) {
         val existingIndex = _queue.value.indexOfFirst { it.id == song.id }
         if (existingIndex >= 0) {
