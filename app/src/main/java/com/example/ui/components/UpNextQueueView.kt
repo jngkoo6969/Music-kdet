@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -27,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,6 +49,16 @@ fun UpNextQueueView(
     onClearQueue: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Open already scrolled to the playing song, and follow it whenever it changes
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (currentIndex - 1).coerceIn(0, (queue.size - 1).coerceAtLeast(0))
+    )
+    LaunchedEffect(currentIndex, queue.size) {
+        if (currentIndex in queue.indices) {
+            listState.animateScrollToItem((currentIndex - 1).coerceAtLeast(0))
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -98,6 +110,7 @@ fun UpNextQueueView(
                 }
 
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 120.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
