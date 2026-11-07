@@ -34,3 +34,22 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# ---- Extra R8 rules ----
+# Kotlin metadata / coroutines
+-keep class kotlin.Metadata { *; }
+-dontwarn kotlinx.coroutines.debug.**
+-keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
+# Moshi (codegen adapters) and Retrofit
+-keep @com.squareup.moshi.JsonClass class * { *; }
+-keepclassmembers class * { @com.squareup.moshi.Json <fields>; }
+-keep class **JsonAdapter { *; }
+-dontwarn retrofit2.**
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations
+# Keep enums used by name
+-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }
+# App classes used from the manifest / by name
+-keep class com.example.MainActivity { *; }
+-keep class com.example.**Receiver { *; }
