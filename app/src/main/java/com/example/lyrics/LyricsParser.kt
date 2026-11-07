@@ -12,14 +12,16 @@ data class ParsedLyrics(
 
 object LyricsParser {
     // Regex matching timestamp formats like [01:23.45], [1:23.456], [01:23]
-    private val TIME_TAG_REGEX = Regex("""\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?]""")
+    private val TIME_TAG_REGEX = Regex("""\[\s*(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\s*]""")
+    // Inline word-level tags such as <00:12.30> (enhanced LRC) are removed from the text
+    private val WORD_TAG_REGEX = Regex("""<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>""")
 
     fun parse(rawText: String?): ParsedLyrics {
         if (rawText.isNullOrBlank()) {
             return ParsedLyrics(emptyList(), false)
         }
 
-        val rawLines = rawText.lines()
+        val rawLines = rawText.removePrefix("\uFEFF").lines()
         val parsedLines = mutableListOf<LyricLine>()
         var foundTimeTag = false
 
@@ -32,7 +34,7 @@ object LyricsParser {
             if (matches.isNotEmpty()) {
                 foundTimeTag = true
                 // Text is what remains after stripping tags
-                val textOnly = trimmed.replace(TIME_TAG_REGEX, "").trim()
+                val textOnly = trimmed.replace(TIME_TAG_REGEX, "").replace(WORD_TAG_REGEX, "").trim()
                 for (match in matches) {
                     val minutes = match.groupValues[1].toLongOrNull() ?: 0L
                     val seconds = match.groupValues[2].toLongOrNull() ?: 0L
