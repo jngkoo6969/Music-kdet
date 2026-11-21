@@ -57,6 +57,7 @@ fun SettingsScreen(
     onManualFadeDurationChange: (Long) -> Unit,
     soundSettings: SoundSettings,
     onSoundSettingsChange: (SoundSettings) -> Unit,
+    lastBlendInfo: String?,
     songs: List<Song>,
     onRescanDevice: () -> Unit,
     formatDuration: (Long) -> String,
@@ -167,7 +168,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, loudness, intro/outro) and the next one starts on a beat, is tempo-matched and level-matched, and swaps bass with the outgoing song. Auto picks a different blend length for every pair of songs - long when music meets music, shorter when two voices would clash. Works offline. Or choose a fixed length.",
+                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, loudness, intro/outro) and the next one starts on a beat, is tempo-matched and level-matched, and swaps bass with the outgoing song. Auto compares the end of one song with the start of the next and picks the longest blend (4-20 s) that doesn't crowd them - long for a fade-out into a soft intro, short when two full songs meet. Works offline. Or choose a fixed length.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -199,6 +200,15 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
+                }
+
+                if (lastBlendInfo != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Last blend: $lastBlendInfo",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
 
                 HorizontalDivider(
