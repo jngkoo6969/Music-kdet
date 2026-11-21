@@ -14,6 +14,7 @@ import com.example.lyrics.LyricsParser
 import com.example.lyrics.ParsedLyrics
 import com.example.playback.PlaybackManager
 import com.example.playback.PlaybackState
+import com.example.playback.SoundSettings
 import com.example.ui.components.SongSortOption
 import com.example.ui.theme.AppThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -263,6 +264,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleShuffle() = playbackManager.toggleShuffle()
     fun setCrossfadeSec(seconds: Int) = playbackManager.setCrossfadeDuration(seconds)
     fun setManualFadeMs(millis: Long) = playbackManager.setManualFadeDuration(millis)
+    val soundSettings: StateFlow<SoundSettings> = playbackManager.soundSettings
+    fun updateSound(settings: SoundSettings) = playbackManager.updateSoundSettings(settings)
     fun addToQueue(song: Song) = playbackManager.addToQueue(song)
     fun playNext(song: Song) = playbackManager.playNextInQueue(song)
     fun removeFromQueue(index: Int) = playbackManager.removeFromQueue(index)
