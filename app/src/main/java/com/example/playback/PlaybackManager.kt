@@ -40,6 +40,10 @@ class PlaybackManager private constructor(private val context: Context) {
 
     val playbackState: StateFlow<PlaybackState> = engine.playbackState
 
+    /** Equalizer / bass / stereo width / volume leveling. */
+    val soundSettings: StateFlow<SoundSettings> = engine.effects.settings
+    fun updateSoundSettings(settings: SoundSettings) = engine.effects.setSettings(settings)
+
     private val prefs = context.getSharedPreferences("playback_prefs", Context.MODE_PRIVATE)
 
     private var lastSavedQueueKey = ""
