@@ -50,7 +50,11 @@ data class TrackAnalysis(
     val head: BeatInfo?,
     val tail: BeatInfo?,
     /** Measured loudness (RMS, dBFS) of the song's louder parts; null when unknown. Used for volume leveling. */
-    val loudnessDb: Double? = null
+    val loudnessDb: Double? = null,
+    /** How long the song's INTRO stays "open" (sparse / few vocals) before it gets dense. 0 = dense from the start. */
+    val introOpenMs: Long = 0L,
+    /** How long the song's OUTRO has been "open" (fading / instrumental) up to the end of the music. 0 = ends abruptly. */
+    val outroOpenMs: Long = 0L
 )
 
 class TrackAnalyzer(private val context: Context) {
@@ -84,7 +88,9 @@ class TrackAnalyzer(private val context: Context) {
             audibleEndMs = tail?.lastAudibleMs?.takeIf { it >= 0 } ?: -1L,
             head = head?.let { beatsOf(it, tail = false) },
             tail = tail?.let { beatsOf(it, tail = true) },
-            loudnessDb = loudnessOf(head, tail)
+            loudnessDb = loudnessOf(head, tail),
+            introOpenMs = head?.let { openLength(it, tail = false) } ?: 0L,
+            outroOpenMs = tail?.let { openLength(it, tail = true) } ?: 0L
         )
 
         val k = key(song)
@@ -95,7 +101,8 @@ class TrackAnalyzer(private val context: Context) {
             "Analyzed '${song.title}': audible=${result.audibleStartMs}..${result.audibleEndMs} " +
                 "head=${result.head?.bpm?.toInt()}bpm(${result.head?.confidence?.toInt()}) " +
                 "tail=${result.tail?.bpm?.toInt()}bpm(${result.tail?.confidence?.toInt()}) " +
-                "loudness=${result.loudnessDb?.let { "%.1f".format(it) }}dB"
+                "loudness=${result.loudnessDb?.let { "%.1f".format(it) }}dB " +
+                "open=${result.introOpenMs}/${result.outroOpenMs}ms"
         )
         return result
     }
@@ -109,6 +116,7 @@ class TrackAnalyzer(private val context: Context) {
         val lastAudibleMs: Long,
         val low: FloatArray,   // RMS of the low band (kick / bass), one value per hop
         val full: FloatArray,  // RMS of the whole signal, one value per hop
+        val mid: FloatArray,   // RMS of the 300 Hz - 3.4 kHz band (where voices live), one value per hop
         val hops: Int,
         val hopMs: Double,
         val envStartMs: Double
@@ -157,6 +165,12 @@ class TrackAnalyzer(private val context: Context) {
             // envelope accumulators
             val low = FloatArray(MAX_HOPS)
             val full = FloatArray(MAX_HOPS)
+            val mid = FloatArray(MAX_HOPS)
+            var lpHi = 0f
+            var lpLo = 0f
+            var aHi = 0f
+            var aLo = 0f
+            var ssMid = 0.0
             var hops = 0
             var hopSamples = 0
             var lpAlpha = 0f
@@ -195,6 +209,8 @@ class TrackAnalyzer(private val context: Context) {
                         if (hopSamples == 0) {
                             hopSamples = (sr * HOP_SECONDS).toInt().coerceAtLeast(1)
                             lpAlpha = (1.0 - exp(-2.0 * PI * LOW_BAND_HZ / sr)).toFloat()
+                            aHi = (1.0 - exp(-2.0 * PI * 3400.0 / sr)).toFloat()
+                            aLo = (1.0 - exp(-2.0 * PI * 300.0 / sr)).toFloat()
                         }
                         if (envStartMs < 0) envStartMs = info.presentationTimeUs / 1000.0
 
@@ -215,16 +231,22 @@ class TrackAnalyzer(private val context: Context) {
                                 acc = 0
                                 chIdx = 0
                                 lp += lpAlpha * (m - lp)
+                                lpHi += aHi * (m - lpHi)
+                                lpLo += aLo * (m - lpLo)
+                                val vb = lpHi - lpLo
+                                ssMid += (vb * vb).toDouble()
                                 ssFull += (m * m).toDouble()
                                 ssLow += (lp * lp).toDouble()
                                 if (++inHop == hopSamples) {
                                     if (hops < MAX_HOPS) {
                                         full[hops] = sqrt(ssFull / hopSamples).toFloat()
                                         low[hops] = sqrt(ssLow / hopSamples).toFloat()
+                                        mid[hops] = sqrt(ssMid / hopSamples).toFloat()
                                         hops++
                                     }
                                     ssFull = 0.0
                                     ssLow = 0.0
+                                    ssMid = 0.0
                                     inHop = 0
                                 }
                             }
@@ -242,7 +264,7 @@ class TrackAnalyzer(private val context: Context) {
             }
 
             val hopMs = if (hopSamples > 0) hopSamples * 1000.0 / sampleRate.coerceAtLeast(8000) else HOP_SECONDS * 1000.0
-            return Scan(first, last, low, full, hops, hopMs, max(envStartMs, 0.0))
+            return Scan(first, last, low, full, mid, hops, hopMs, max(envStartMs, 0.0))
         } catch (e: Exception) {
             Log.w(tag, "Analysis scan failed for ${song.title}: ${e.message}")
             return null
@@ -271,6 +293,44 @@ class TrackAnalyzer(private val context: Context) {
         for (i in 0 until use) power += values[i].toDouble() * values[i]
         val rms = sqrt(power / use)
         return 20.0 * kotlin.math.log10(rms / 32768.0)
+    }
+
+    /**
+     * "Open" = a part of the song where a mix is welcome: it is quiet / fading, or the voice band is much
+     * weaker than usual (instrumental intro, drum-only intro, long outro).
+     *
+     * Walks 1-second blocks from the edge of the music inward (start for the intro, end for the outro) and counts
+     * how many blocks in a row are open. This is an energy-based estimate, not real vocal detection, but it is
+     * what lets Automix choose 6 s here and 20 s there instead of always the same length.
+     */
+    private fun openLength(sc: Scan, tail: Boolean): Long {
+        if (sc.hops < 300 || sc.firstAudibleMs < 0 || sc.lastAudibleMs < 0) return 0L
+        val blockHops = (1000.0 / sc.hopMs).toInt().coerceAtLeast(10)
+        val envEnd = sc.envStartMs + sc.hops * sc.hopMs
+        val from = ((max(sc.firstAudibleMs.toDouble(), sc.envStartMs) - sc.envStartMs) / sc.hopMs).toInt().coerceIn(0, sc.hops)
+        val to = ((min(sc.lastAudibleMs.toDouble(), envEnd) - sc.envStartMs) / sc.hopMs).toInt().coerceIn(0, sc.hops)
+        val nBlocks = (to - from) / blockHops
+        if (nBlocks < 6) return 0L
+
+        fun blockRms(arr: FloatArray, b: Int): Float {
+            var ss = 0.0
+            val s = from + b * blockHops
+            for (i in s until s + blockHops) ss += arr[i].toDouble() * arr[i]
+            return sqrt(ss / blockHops).toFloat()
+        }
+        val f = FloatArray(nBlocks) { blockRms(sc.full, it) }
+        val m = FloatArray(nBlocks) { blockRms(sc.mid, it) }
+        val refIdx = (nBlocks * 0.7).toInt().coerceAtMost(nBlocks - 1)
+        val refF = f.sorted()[refIdx]
+        val refM = m.sorted()[refIdx]
+        if (refF <= 0f) return 0L
+
+        val order: Iterable<Int> = if (tail) (nBlocks - 1 downTo 0) else (0 until nBlocks)
+        var open = 0
+        for (b in order) {
+            if (f[b] < 0.6f * refF || m[b] < 0.5f * refM) open++ else break
+        }
+        return min(open * 1000L, MAX_OPEN_MS)
     }
 
     private fun beatsOf(scan: Scan, tail: Boolean): BeatInfo? {
@@ -307,24 +367,28 @@ class TrackAnalyzer(private val context: Context) {
     }
 
     private fun encode(a: TrackAnalysis) =
-        "${a.audibleStartMs};${a.audibleEndMs};${encodeBeat(a.head)};${encodeBeat(a.tail)};${a.loudnessDb ?: "-"}"
+        "${a.audibleStartMs};${a.audibleEndMs};${encodeBeat(a.head)};${encodeBeat(a.tail)};${a.loudnessDb ?: "-"};${a.introOpenMs};${a.outroOpenMs}"
 
     private fun decode(s: String): TrackAnalysis? = try {
         val p = s.split(";")
-        if (p.size != 5) null
-        else TrackAnalysis(p[0].toLong(), p[1].toLong(), decodeBeat(p[2]), decodeBeat(p[3]), p[4].toDoubleOrNull())
+        if (p.size != 7) null
+        else TrackAnalysis(
+            p[0].toLong(), p[1].toLong(), decodeBeat(p[2]), decodeBeat(p[3]),
+            p[4].toDoubleOrNull(), p[5].toLong(), p[6].toLong()
+        )
     } catch (e: Exception) {
         null
     }
 
     companion object {
         /** Bump when the algorithm changes so old cached results are ignored. */
-        private const val VERSION = 4
+        private const val VERSION = 5
         private const val WINDOW_MS = 45_000L   // longer window = steadier tempo estimate
         private const val REGION_MS = 28_000.0
         private const val HOP_SECONDS = 0.010
         private const val LOW_BAND_HZ = 150.0
         private const val MAX_HOPS = 6_000
+        private const val MAX_OPEN_MS = 24_000L
         private const val GATE_RMS = 250f        // about -42 dBFS: below this a hop is silence / fade
         private const val AUDIBLE_THRESHOLD = 700 // about -33 dB on a 16-bit scale
     }
