@@ -52,7 +52,7 @@ data class PlaybackState(
     val repeatMode: RepeatMode = RepeatMode.ALL,
     val isShuffle: Boolean = false,
     val crossfadeDurationSec: Int = -1, // -1 (Auto: length chosen per song pair), 0 (Off), 2, 4, 6, 8, 12
-    val manualFadeDurationMs: Long = 400L,
+    val manualFadeDurationMs: Long = 800L, // skip crossfade (Next / Previous): 0 = Off
     val volume: Float = 1.0f,
     val errorMessage: String? = null
 )
@@ -101,8 +101,6 @@ class AudioTransitionEngine(
         const val SPEED_RAMP_MS = 6_000L
         /** Longest blend Auto may choose; the engine starts watching this early. */
         const val AUTO_MAX_FADE_MS = 20_000L
-        /** Auto blend used when the user presses Next / Previous. */
-        const val AUTO_SKIP_FADE_MS = 5_000L
     }
 
     private var crossfadeJob: Job? = null
@@ -373,96 +371,17 @@ class AudioTransitionEngine(
     }
 
     /**
-     * Smoothly transitions to next/previous song with configurable manual fade duration.
+     * Next / Previous / tapping a song: a SHORT equal-power crossfade (default 0.8 s) between the two songs.
+     * Short enough to feel instant, long enough that nothing clicks or cuts. It does not depend on the Automix
+     * setting. 0 = Off = cut straight to the new song.
      */
     fun transitionToSong(nextSong: Song, isNext: Boolean = true) {
-        // Automix is on: pressing Next / Previous blends into the new song instead of cutting to it.
-        val automixSec = _playbackState.value.crossfadeDurationSec
-        if (automixSec != 0 && _playbackState.value.isPlaying && activePlayer != null) {
-            automixSkipTo(nextSong, if (automixSec < 0) AUTO_SKIP_FADE_MS else automixSec * 1000L)
-            return
-        }
-
-        val manualFadeMs = _playbackState.value.manualFadeDurationMs
-        if (manualFadeMs <= 0 || !_playbackState.value.isPlaying || activePlayer == null) {
+        val fadeMs = _playbackState.value.manualFadeDurationMs
+        if (fadeMs <= 0 || !_playbackState.value.isPlaying || activePlayer == null) {
             playSong(nextSong)
             return
         }
-
-        abortTransitions()
-
-        manualPreSwap = true
-        manualTransitionJob = engineScope.launch {
-            val currentPlayer = activePlayer ?: return@launch
-            val nextP = standbyPlayer ?: return@launch
-            val maxVol = _playbackState.value.volume
-
-            try {
-                nextP.reset()
-                applyVol(nextP, 0.0f)
-                setDataSource(nextP, nextSong)
-                nextP.prepare()
-
-                val steps = 15
-                val stepDelay = (manualFadeMs / 2) / steps
-
-                for (i in 1..steps) {
-                    val vol = (1.0f - (i.toFloat() / steps)) * maxVol
-                    applyVol(currentPlayer, vol)
-                    delay(stepDelay)
-                }
-
-                currentPlayer.pause()
-                applyVol(currentPlayer, maxVol)
-                try { currentPlayer.reset() } catch (e: Exception) { /* ignore */ }
-
-                activePlayerIndex = if (activePlayerIndex == 0) 1 else 0
-                manualPreSwap = false
-
-                if (pauseAfterManual) {
-                    // User pressed pause during the fade-out: land on the new song, paused.
-                    pauseAfterManual = false
-                    applyVol(nextP, maxVol)
-                    _playbackState.value = _playbackState.value.copy(
-                        currentSong = nextSong,
-                        isPlaying = false,
-                        durationMs = nextP.duration.toLong(),
-                        currentPositionMs = 0L,
-                        isCrossfading = false,
-                        errorMessage = null
-                    )
-                    onSongChanged(nextSong)
-                    return@launch
-                }
-
-                nextP.start()
-                flushSpeed(activePlayerIndex)
-                _playbackState.value = _playbackState.value.copy(
-                    currentSong = nextSong,
-                    isPlaying = true,
-                    durationMs = nextP.duration.toLong(),
-                    currentPositionMs = 0L,
-                    isCrossfading = false,
-                    errorMessage = null
-                )
-                onSongChanged(nextSong)
-
-                for (i in 1..steps) {
-                    val vol = (i.toFloat() / steps) * maxVol
-                    applyVol(nextP, vol)
-                    delay(stepDelay)
-                }
-                applyVol(nextP, maxVol)
-
-                preloadNextTrack()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(tag, "Manual fade transition error, fallback to direct play", e)
-                manualPreSwap = false
-                playSong(nextSong)
-            }
-        }
+        automixSkipTo(nextSong, fadeMs)
     }
 
     /**
@@ -498,7 +417,7 @@ class AudioTransitionEngine(
                 // Never overlap longer than what is left of the current song
                 val overlapMs = min(crossfadeMs, max(300L, durA - startPos - 200L))
 
-                effects.setBassCut(skipNextIndex, 1f)
+                if (overlapMs >= 1_500L) effects.setBassCut(skipNextIndex, 1f)
                 if (_playbackState.value.isPlaying) nextP.start()
                 _playbackState.value = _playbackState.value.copy(isCrossfading = true, errorMessage = null)
 
@@ -511,8 +430,10 @@ class AudioTransitionEngine(
                     val fraction = if (oldSongEnded) 1.0f
                     else ((pos - startPos).toFloat() / overlapMs).coerceIn(0.0f, 1.0f)
 
-                    effects.setBassCut(skipCurIndex, smoothStep(0.30f, 0.60f, fraction))
-                    effects.setBassCut(skipNextIndex, 1f - smoothStep(0.40f, 0.70f, fraction))
+                    if (overlapMs >= 1_500L) { // a bass swap only makes sense for a real blend, not a quick skip
+                        effects.setBassCut(skipCurIndex, smoothStep(0.30f, 0.60f, fraction))
+                        effects.setBassCut(skipNextIndex, 1f - smoothStep(0.40f, 0.70f, fraction))
+                    }
 
                     val angle = fraction * (PI.toFloat() / 2f)
                     val master = _playbackState.value.volume
@@ -525,7 +446,7 @@ class AudioTransitionEngine(
                         swapToNextSong(nextP, nextSong)
                     }
                     if (fraction >= 1.0f) break
-                    delay(40)
+                    delay(if (overlapMs < 2_000L) 16L else 40L) // finer steps for a short fade = smoother
                 }
 
                 // Blend finished
