@@ -50,7 +50,7 @@ class PlaybackManager private constructor(private val context: Context) {
 
     init {
         // Restore saved Automix / skip-fade settings (they used to reset to 4 sec on every launch)
-        engine.setCrossfadeDurationSec(prefs.getInt("automix_sec", 4))
+        engine.setCrossfadeDurationSec(prefs.getInt("automix_sec", -1))
         engine.setManualFadeDurationMs(prefs.getLong("manual_fade_ms", 400L))
         try {
             engine.setRepeatMode(RepeatMode.valueOf(prefs.getString("repeat", RepeatMode.ALL.name) ?: RepeatMode.ALL.name))
