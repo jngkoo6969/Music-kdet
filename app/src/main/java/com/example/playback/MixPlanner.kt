@@ -1,6 +1,9 @@
 package com.example.playback
 
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.ceil
 import kotlin.math.ln
@@ -48,24 +51,63 @@ object MixPlanner {
     private const val CLASH_FADE_MS = 3_000L
 
     /**
-     * AUTO mode: picks the blend length for THIS pair of songs from what the songs themselves offer.
+     * AUTO mode: finds the best blend length (4..20 s) for THIS pair of songs.
      *
-     *  - both sides "open" (instrumental / fading outro meets quiet intro) -> long blend, 8..20 s: music meets music
-     *  - only one side open -> blend as long as that open part lasts, 5..14 s: the voice of one song
-     *    rides over the bare instrumental of the other, instead of two singers talking over each other
-     *  - neither side open (dense / abrupt) -> a short 4 s blend
-     *  - not analyzed yet -> 6 s
+     * For every candidate length the two songs are laid over each other exactly as the crossfade would play them
+     * (end of the outgoing song against the start of the incoming one) and scored for crowding:
+     *  - "voice vs voice": both songs strong in the voice band at the same moment
+     *  - "dense vs dense" : both songs at full energy at the same moment
+     * The middle of the blend counts most, because that is where both songs are loud.
+     * The longest length that stays calm wins. So:
+     *  - long fade-out / instrumental outro + slow build-up intro  -> long blend (up to 20 s)
+     *  - one song bare while the other sings                       -> as long as the bare part lasts
+     *  - two full-on songs                                         -> short blend (4 s, or 6 s when beat-matched)
+     * Beat-matched pairs get a little more tolerance, since overlapping on the beat sounds intentional.
+     * No analysis yet -> 8 s.
      */
     fun autoFadeMs(a: TrackAnalysis?, b: TrackAnalysis?): Long {
-        if (a == null || b == null) return 6_000L
-        val out = a.outroOpenMs
-        val inn = b.introOpenMs
-        val ms = when {
-            out >= 6_000L && inn >= 6_000L -> min(out, inn).coerceIn(8_000L, 20_000L)
-            out >= 4_000L || inn >= 4_000L -> max(out, inn).coerceIn(5_000L, 14_000L)
-            else -> 4_000L
+        val outro = a?.outroProfile
+        val intro = b?.introProfile
+        if (a == null || b == null || outro == null || intro == null) return 8_000L
+
+        val matched = canBeatMatch(a, b)
+        val tolerance = if (matched) 0.50 else 0.40
+        var best = if (matched) 6 else 4
+        for (len in 4..20) {
+            if (clashScore(outro, intro, len) <= tolerance) best = max(best, len)
         }
-        return (ms / 1000L) * 1000L
+        return best * 1000L
+    }
+
+    /** 0 = the two songs leave each other room, 1 = both are at full voice + energy the whole blend. */
+    private fun clashScore(outro: EdgeProfile, intro: EdgeProfile, len: Int): Double {
+        fun at(x: FloatArray, i: Int) = if (i in x.indices) min(1f, x[i]).toDouble() else 1.0
+        var sum = 0.0
+        var weights = 0.0
+        for (i in 0 until len) {
+            val u = len - 1 - i // second counted from the END of the outgoing song
+            val v = i           // second counted from the START of the incoming song
+            val x = (i + 0.5) / len
+            val wOut = cos(PI * x / 2).let { it * it }
+            val pairWeight = 4.0 * wOut * (1.0 - wOut) // peaks in the middle, where both are loud
+            val voices = at(outro.voc, u) * at(intro.voc, v)
+            val energy = at(outro.act, u) * at(intro.act, v)
+            sum += pairWeight * (0.6 * voices + 0.4 * energy)
+            weights += pairWeight
+        }
+        return if (weights > 0.0) sum / weights else 1.0
+    }
+
+    /** Can the engine line the two songs up on the beat (trusted grids, tempos within the stretch limit)? */
+    private fun canBeatMatch(a: TrackAnalysis, b: TrackAnalysis): Boolean {
+        val ta = a.tail ?: return false
+        val hb = b.head ?: return false
+        if (ta.confidence < MIN_CONFIDENCE || hb.confidence < MIN_CONFIDENCE) return false
+        var bestDiff = Double.MAX_VALUE
+        for (f in doubleArrayOf(0.5, 1.0, 2.0)) {
+            bestDiff = min(bestDiff, abs(ln(hb.periodMs * f / ta.periodMs)))
+        }
+        return abs(exp(bestDiff) - 1.0) <= MAX_STRETCH + 0.005
     }
 
     fun plan(a: TrackAnalysis, b: TrackAnalysis, durationAMs: Long, crossfadeMs: Long): MixPlan {
