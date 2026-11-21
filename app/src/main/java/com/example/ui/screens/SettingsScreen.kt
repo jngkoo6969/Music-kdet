@@ -207,12 +207,12 @@ fun SettingsScreen(
                 )
 
                 Text(
-                    text = "Manual Skip Fade (Next / Previous)",
+                    text = "Skip Crossfade (Next / Previous)",
                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "Smooth volume fade when pressing Next or Previous to prevent clicks.",
+                    text = "Short crossfade when pressing Next or Previous (or tapping a song). 0.8 s feels the smoothest.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -222,7 +222,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf(0L to "Off", 200L to "200ms", 400L to "400ms", 600L to "600ms").forEach { (ms, label) ->
+                    listOf(0L to "Off", 500L to "0.5 s", 800L to "0.8 s", 1200L to "1.2 s").forEach { (ms, label) ->
                         FilterChip(
                             selected = manualFadeDurationMs == ms,
                             onClick = { onManualFadeDurationChange(ms) },
