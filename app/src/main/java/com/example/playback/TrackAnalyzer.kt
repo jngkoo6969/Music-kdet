@@ -17,6 +17,7 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -51,11 +52,20 @@ data class TrackAnalysis(
     val tail: BeatInfo?,
     /** Measured loudness (RMS, dBFS) of the song's louder parts; null when unknown. Used for volume leveling. */
     val loudnessDb: Double? = null,
-    /** How long the song's INTRO stays "open" (sparse / few vocals) before it gets dense. 0 = dense from the start. */
-    val introOpenMs: Long = 0L,
-    /** How long the song's OUTRO has been "open" (fading / instrumental) up to the end of the music. 0 = ends abruptly. */
-    val outroOpenMs: Long = 0L
+    /** Second-by-second density of the first 24 s of music (how busy / how vocal it is). */
+    val introProfile: EdgeProfile? = null,
+    /** Second-by-second density of the last 24 s of music, index 0 = the very end. */
+    val outroProfile: EdgeProfile? = null
 )
+
+/**
+ * How "busy" each second at one edge of a song is, relative to that song's own typical level.
+ * Index 0 is the second right at the edge (start of the music for an intro, end of the music for an outro).
+ *  act : overall energy  (about 1.0 = like the song's main sections, near 0 = fading / silent)
+ *  voc : energy in the voice band 300 Hz - 3.4 kHz (low = instrumental / drums only / fading)
+ * Automix uses it to find the longest blend during which the two songs don't crowd each other.
+ */
+class EdgeProfile(val act: FloatArray, val voc: FloatArray)
 
 class TrackAnalyzer(private val context: Context) {
 
@@ -89,8 +99,8 @@ class TrackAnalyzer(private val context: Context) {
             head = head?.let { beatsOf(it, tail = false) },
             tail = tail?.let { beatsOf(it, tail = true) },
             loudnessDb = loudnessOf(head, tail),
-            introOpenMs = head?.let { openLength(it, tail = false) } ?: 0L,
-            outroOpenMs = tail?.let { openLength(it, tail = true) } ?: 0L
+            introProfile = head?.let { edgeProfile(it, tail = false) },
+            outroProfile = tail?.let { edgeProfile(it, tail = true) }
         )
 
         val k = key(song)
@@ -102,7 +112,8 @@ class TrackAnalyzer(private val context: Context) {
                 "head=${result.head?.bpm?.toInt()}bpm(${result.head?.confidence?.toInt()}) " +
                 "tail=${result.tail?.bpm?.toInt()}bpm(${result.tail?.confidence?.toInt()}) " +
                 "loudness=${result.loudnessDb?.let { "%.1f".format(it) }}dB " +
-                "open=${result.introOpenMs}/${result.outroOpenMs}ms"
+                "intro=${result.introProfile?.act?.take(8)?.joinToString(",") { "%.1f".format(it) }} " +
+                "outro=${result.outroProfile?.act?.take(8)?.joinToString(",") { "%.1f".format(it) }}"
         )
         return result
     }
@@ -296,21 +307,18 @@ class TrackAnalyzer(private val context: Context) {
     }
 
     /**
-     * "Open" = a part of the song where a mix is welcome: it is quiet / fading, or the voice band is much
-     * weaker than usual (instrumental intro, drum-only intro, long outro).
-     *
-     * Walks 1-second blocks from the edge of the music inward (start for the intro, end for the outro) and counts
-     * how many blocks in a row are open. This is an energy-based estimate, not real vocal detection, but it is
-     * what lets Automix choose 6 s here and 20 s there instead of always the same length.
+     * Second-by-second density of the 24 s next to one edge of the music (see EdgeProfile).
+     * Energy-based estimate, not real vocal detection: the voice band is just where singing lives,
+     * so a bare instrumental or a fade-out shows up as low, a full vocal section as high.
      */
-    private fun openLength(sc: Scan, tail: Boolean): Long {
-        if (sc.hops < 300 || sc.firstAudibleMs < 0 || sc.lastAudibleMs < 0) return 0L
+    private fun edgeProfile(sc: Scan, tail: Boolean): EdgeProfile? {
+        if (sc.hops < 300 || sc.firstAudibleMs < 0 || sc.lastAudibleMs < 0) return null
         val blockHops = (1000.0 / sc.hopMs).toInt().coerceAtLeast(10)
         val envEnd = sc.envStartMs + sc.hops * sc.hopMs
         val from = ((max(sc.firstAudibleMs.toDouble(), sc.envStartMs) - sc.envStartMs) / sc.hopMs).toInt().coerceIn(0, sc.hops)
         val to = ((min(sc.lastAudibleMs.toDouble(), envEnd) - sc.envStartMs) / sc.hopMs).toInt().coerceIn(0, sc.hops)
         val nBlocks = (to - from) / blockHops
-        if (nBlocks < 6) return 0L
+        if (nBlocks < 8) return null
 
         fun blockRms(arr: FloatArray, b: Int): Float {
             var ss = 0.0
@@ -323,14 +331,17 @@ class TrackAnalyzer(private val context: Context) {
         val refIdx = (nBlocks * 0.7).toInt().coerceAtMost(nBlocks - 1)
         val refF = f.sorted()[refIdx]
         val refM = m.sorted()[refIdx]
-        if (refF <= 0f) return 0L
+        if (refF <= 0f || refM <= 0f) return null
 
-        val order: Iterable<Int> = if (tail) (nBlocks - 1 downTo 0) else (0 until nBlocks)
-        var open = 0
-        for (b in order) {
-            if (f[b] < 0.6f * refF || m[b] < 0.5f * refM) open++ else break
+        val n = min(PROFILE_BLOCKS, nBlocks)
+        val act = FloatArray(n)
+        val voc = FloatArray(n)
+        for (k in 0 until n) {
+            val b = if (tail) nBlocks - 1 - k else k
+            act[k] = (f[b] / refF).coerceIn(0f, 1.5f)
+            voc[k] = (m[b] / refM).coerceIn(0f, 1.5f)
         }
-        return min(open * 1000L, MAX_OPEN_MS)
+        return EdgeProfile(act, voc)
     }
 
     private fun beatsOf(scan: Scan, tail: Boolean): BeatInfo? {
@@ -366,15 +377,29 @@ class TrackAnalyzer(private val context: Context) {
         return BeatInfo(p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), p[3].toDouble(), p[4].toInt())
     }
 
+    private fun encodeProfile(p: EdgeProfile?): String {
+        if (p == null) return "-"
+        fun enc(x: FloatArray) = x.joinToString(",") { (it * 100f).roundToInt().toString() }
+        return enc(p.act) + ":" + enc(p.voc)
+    }
+
+    private fun decodeProfile(s: String): EdgeProfile? {
+        if (s == "-") return null
+        val parts = s.split(":")
+        if (parts.size != 2) return null
+        fun dec(x: String) = x.split(",").map { it.toInt() / 100f }.toFloatArray()
+        return EdgeProfile(dec(parts[0]), dec(parts[1]))
+    }
+
     private fun encode(a: TrackAnalysis) =
-        "${a.audibleStartMs};${a.audibleEndMs};${encodeBeat(a.head)};${encodeBeat(a.tail)};${a.loudnessDb ?: "-"};${a.introOpenMs};${a.outroOpenMs}"
+        "${a.audibleStartMs};${a.audibleEndMs};${encodeBeat(a.head)};${encodeBeat(a.tail)};${a.loudnessDb ?: "-"};${encodeProfile(a.introProfile)};${encodeProfile(a.outroProfile)}"
 
     private fun decode(s: String): TrackAnalysis? = try {
         val p = s.split(";")
         if (p.size != 7) null
         else TrackAnalysis(
             p[0].toLong(), p[1].toLong(), decodeBeat(p[2]), decodeBeat(p[3]),
-            p[4].toDoubleOrNull(), p[5].toLong(), p[6].toLong()
+            p[4].toDoubleOrNull(), decodeProfile(p[5]), decodeProfile(p[6])
         )
     } catch (e: Exception) {
         null
@@ -382,13 +407,13 @@ class TrackAnalyzer(private val context: Context) {
 
     companion object {
         /** Bump when the algorithm changes so old cached results are ignored. */
-        private const val VERSION = 5
+        private const val VERSION = 6
         private const val WINDOW_MS = 45_000L   // longer window = steadier tempo estimate
         private const val REGION_MS = 28_000.0
         private const val HOP_SECONDS = 0.010
         private const val LOW_BAND_HZ = 150.0
         private const val MAX_HOPS = 6_000
-        private const val MAX_OPEN_MS = 24_000L
+        private const val PROFILE_BLOCKS = 24
         private const val GATE_RMS = 250f        // about -42 dBFS: below this a hop is silence / fade
         private const val AUDIBLE_THRESHOLD = 700 // about -33 dB on a 16-bit scale
     }
