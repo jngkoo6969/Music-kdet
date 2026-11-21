@@ -276,6 +276,7 @@ class PlaybackManager private constructor(private val context: Context) {
         if (originalQueue.isNotEmpty()) {
             originalQueue = originalQueue + song
         }
+        engine.refreshNext()
     }
 
     fun playNextInQueue(song: Song) {
@@ -284,6 +285,7 @@ class PlaybackManager private constructor(private val context: Context) {
         val insertAt = (currentIdx + 1).coerceAtMost(list.size)
         list.add(insertAt, song)
         _queue.value = list
+        engine.refreshNext()
     }
 
     fun removeFromQueue(index: Int) {
@@ -293,10 +295,13 @@ class PlaybackManager private constructor(private val context: Context) {
             _queue.value = list
             if (index < _currentIndex.value) {
                 _currentIndex.value = _currentIndex.value - 1
+                engine.refreshNext()
             } else if (index == _currentIndex.value && list.isNotEmpty()) {
                 val newIdx = index.coerceAtMost(list.size - 1)
                 _currentIndex.value = newIdx
-                engine.playSong(list[newIdx])
+                engine.playSong(list[newIdx]) // playSong already preloads the next song
+            } else {
+                engine.refreshNext()
             }
         }
     }
@@ -345,6 +350,7 @@ class PlaybackManager private constructor(private val context: Context) {
             } else if (fromIndex > curr && toIndex <= curr) {
                 _currentIndex.value = curr + 1
             }
+            engine.refreshNext()
         }
     }
 
