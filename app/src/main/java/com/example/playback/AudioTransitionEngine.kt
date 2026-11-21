@@ -7,6 +7,7 @@ import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.net.Uri
 import android.os.Build
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -31,6 +32,9 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.PI
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.sign
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.coroutines.resume
@@ -75,6 +79,12 @@ class AudioTransitionEngine(
 
     // Automix: offline analysis (tempo / beats / audible bounds) and tempo matching state
     private val analyzer = TrackAnalyzer(context)
+
+    /** Equalizer / bass / stereo width / volume leveling, one chain per MediaPlayer. */
+    val effects = AudioEffectsManager(context)
+    private val songOnPlayer = arrayOfNulls<Song>(2)
+    private val shownScale = floatArrayOf(1f, 1f)   // level correction currently applied to each player (eases toward the target)
+    private var ducked = false
     private val analysisInFlight = ConcurrentHashMap<Long, Boolean>()
     private var speedRampJob: Job? = null
     private val targetSpeed = floatArrayOf(1f, 1f)       // speed we want each player to run at
@@ -126,12 +136,13 @@ class AudioTransitionEngine(
                 pauseInternal()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                if (!_playbackState.value.isCrossfading) activePlayer?.setVolume(0.25f, 0.25f)
+                if (!_playbackState.value.isCrossfading) { ducked = true; applyVol(activePlayer, 0.25f) }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasAudioFocus = true
+                ducked = false
                 if (!_playbackState.value.isCrossfading) {
-                    activePlayer?.setVolume(_playbackState.value.volume, _playbackState.value.volume)
+                    applyVol(activePlayer, _playbackState.value.volume)
                 }
                 if (resumeOnFocusGain && !_playbackState.value.isPlaying && _playbackState.value.currentSong != null) {
                     resumeOnFocusGain = false
@@ -178,13 +189,13 @@ class AudioTransitionEngine(
         playerA?.release()
         playerB?.release()
 
-        playerA = createPlayer("PlayerA")
-        playerB = createPlayer("PlayerB")
+        playerA = createPlayer("PlayerA", 0)
+        playerB = createPlayer("PlayerB", 1)
         activePlayerIndex = 0
     }
 
-    private fun createPlayer(name: String): MediaPlayer {
-        return MediaPlayer().apply {
+    private fun createPlayer(name: String, index: Int): MediaPlayer {
+        val created = MediaPlayer().apply {
             setAudioAttributes(audioAttributes)
             setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK)
             setOnErrorListener { mp, what, extra ->
@@ -200,6 +211,8 @@ class AudioTransitionEngine(
                 handlePlayerCompletion(mp)
             }
         }
+        effects.attach(index, created.audioSessionId)
+        return created
     }
 
     private val activePlayer: MediaPlayer?
@@ -226,6 +239,54 @@ class AudioTransitionEngine(
         }
     }
 
+    private fun playerIndexOf(p: MediaPlayer?): Int = when {
+        p == null -> -1
+        p === playerA -> 0
+        p === playerB -> 1
+        else -> -1
+    }
+
+    /** MediaPlayer.setVolume with this player's loudness-leveling / EQ-headroom correction applied on top. */
+    private fun applyVol(p: MediaPlayer?, v: Float) {
+        if (p == null) return
+        val idx = playerIndexOf(p)
+        val scale = if (idx >= 0) shownScale[idx] else 1f
+        try { p.setVolume(v * scale, v * scale) } catch (e: Exception) { /* ignore */ }
+    }
+
+    /** Tells the effects chain how loud the song on this player is (once the song has been analyzed). */
+    private fun refreshLevel(idx: Int) {
+        val loudness = songOnPlayer[idx]?.let { analyzer.cached(it)?.loudnessDb }
+        effects.setTrackLoudness(idx, loudness)
+    }
+
+    /**
+     * Runs every 250 ms: lets the applied level correction glide toward its target (max 1 dB per tick), so that
+     * finishing an analysis, toggling leveling or moving an EQ slider never makes the volume jump.
+     */
+    private fun tickLevels() {
+        for (i in 0..1) {
+            refreshLevel(i)
+            val target = effects.volumeScale(i)
+            val cur = shownScale[i]
+            if (abs(target - cur) < 0.002f) continue
+            val curDb = 20f * log10(cur)
+            val tDb = 20f * log10(target)
+            val nextDb = if (abs(tDb - curDb) <= 1f) tDb else curDb + sign(tDb - curDb)
+            shownScale[i] = 10f.pow(nextDb / 20f)
+            if (i == activePlayerIndex && !ducked &&
+                !_playbackState.value.isCrossfading && manualTransitionJob?.isActive != true
+            ) {
+                applyVol(playerAt(i), _playbackState.value.volume)
+            }
+        }
+    }
+
+    private fun smoothStep(e0: Float, e1: Float, x: Float): Float {
+        val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
     /**
      * Cancels any running crossfade / manual fade and puts BOTH players back in a clean state.
      * Without this, the standby player keeps playing in the background (the "can't pause" bug).
@@ -242,6 +303,7 @@ class AudioTransitionEngine(
         pauseAfterManual = false
         speedRampJob?.cancel()
         speedRampJob = null
+        effects.clearBassCuts()
         for (i in 0..1) {
             if (speedTouched[i]) {
                 targetSpeed[i] = 1f
@@ -254,7 +316,7 @@ class AudioTransitionEngine(
             isPreparedB = false
             preloadedSongId = null
             val v = _playbackState.value.volume
-            try { activePlayer?.setVolume(v, v) } catch (e: Exception) { /* ignore */ }
+            try { applyVol(activePlayer, v) } catch (e: Exception) { /* ignore */ }
             _playbackState.value = _playbackState.value.copy(isCrossfading = false)
         }
     }
@@ -272,7 +334,7 @@ class AudioTransitionEngine(
             try {
                 val player = activePlayer ?: return@launch
                 player.reset()
-                player.setVolume(_playbackState.value.volume, _playbackState.value.volume)
+                applyVol(player, _playbackState.value.volume)
                 setDataSource(player, song)
                 player.prepare()
 
@@ -280,6 +342,7 @@ class AudioTransitionEngine(
                     player.seekTo(startPositionMs.toInt())
                 }
 
+                applyVol(player, _playbackState.value.volume)
                 player.start()
                 flushSpeed(activePlayerIndex)
                 crossfadeFailedForId = null
@@ -332,7 +395,7 @@ class AudioTransitionEngine(
 
             try {
                 nextP.reset()
-                nextP.setVolume(0.0f, 0.0f)
+                applyVol(nextP, 0.0f)
                 setDataSource(nextP, nextSong)
                 nextP.prepare()
 
@@ -341,12 +404,12 @@ class AudioTransitionEngine(
 
                 for (i in 1..steps) {
                     val vol = (1.0f - (i.toFloat() / steps)) * maxVol
-                    currentPlayer.setVolume(vol, vol)
+                    applyVol(currentPlayer, vol)
                     delay(stepDelay)
                 }
 
                 currentPlayer.pause()
-                currentPlayer.setVolume(maxVol, maxVol)
+                applyVol(currentPlayer, maxVol)
                 try { currentPlayer.reset() } catch (e: Exception) { /* ignore */ }
 
                 activePlayerIndex = if (activePlayerIndex == 0) 1 else 0
@@ -355,7 +418,7 @@ class AudioTransitionEngine(
                 if (pauseAfterManual) {
                     // User pressed pause during the fade-out: land on the new song, paused.
                     pauseAfterManual = false
-                    nextP.setVolume(maxVol, maxVol)
+                    applyVol(nextP, maxVol)
                     _playbackState.value = _playbackState.value.copy(
                         currentSong = nextSong,
                         isPlaying = false,
@@ -382,10 +445,10 @@ class AudioTransitionEngine(
 
                 for (i in 1..steps) {
                     val vol = (i.toFloat() / steps) * maxVol
-                    nextP.setVolume(vol, vol)
+                    applyVol(nextP, vol)
                     delay(stepDelay)
                 }
-                nextP.setVolume(maxVol, maxVol)
+                applyVol(nextP, maxVol)
 
                 preloadNextTrack()
             } catch (e: CancellationException) {
@@ -409,6 +472,8 @@ class AudioTransitionEngine(
 
         val currentP = activePlayer ?: run { playSong(nextSong); return }
         val nextP = standbyPlayer ?: run { playSong(nextSong); return }
+        val skipCurIndex = activePlayerIndex
+        val skipNextIndex = 1 - skipCurIndex
 
         crossfadeJob = engineScope.launch {
             try {
@@ -420,7 +485,7 @@ class AudioTransitionEngine(
                 }
                 isPreparedB = false
                 preloadedSongId = null
-                nextP.setVolume(0.0f, 0.0f)
+                applyVol(nextP, 0.0f)
                 val startB = analyzer.cached(nextSong)?.audibleStartMs?.takeIf { it in 150L..8_000L } ?: 0L
                 if (startB >= 20L) seekAndWait(nextP, startB)
 
@@ -429,6 +494,7 @@ class AudioTransitionEngine(
                 // Never overlap longer than what is left of the current song
                 val overlapMs = min(crossfadeMs, max(300L, durA - startPos - 200L))
 
+                effects.setBassCut(skipNextIndex, 1f)
                 if (_playbackState.value.isPlaying) nextP.start()
                 _playbackState.value = _playbackState.value.copy(isCrossfading = true, errorMessage = null)
 
@@ -441,10 +507,13 @@ class AudioTransitionEngine(
                     val fraction = if (oldSongEnded) 1.0f
                     else ((pos - startPos).toFloat() / overlapMs).coerceIn(0.0f, 1.0f)
 
+                    effects.setBassCut(skipCurIndex, smoothStep(0.30f, 0.60f, fraction))
+                    effects.setBassCut(skipNextIndex, 1f - smoothStep(0.40f, 0.70f, fraction))
+
                     val angle = fraction * (PI.toFloat() / 2f)
                     val master = _playbackState.value.volume
-                    currentP.setVolume(cos(angle) * master, cos(angle) * master)
-                    nextP.setVolume(sin(angle) * master, sin(angle) * master)
+                    applyVol(currentP, cos(angle) * master)
+                    applyVol(nextP, sin(angle) * master)
 
                     // Title / artwork switch at the midpoint of the blend
                     if (!swapped && fraction >= 0.5f) {
@@ -456,11 +525,12 @@ class AudioTransitionEngine(
                 }
 
                 // Blend finished
+                effects.clearBassCuts()
                 try { currentP.pause() } catch (e: Exception) { /* ignore */ }
                 try { currentP.reset() } catch (e: Exception) { /* ignore */ }
-                currentP.setVolume(1.0f, 1.0f)
+                applyVol(currentP, 1.0f)
                 val master = _playbackState.value.volume
-                nextP.setVolume(master, master)
+                applyVol(nextP, master)
                 if (!swapped) swapToNextSong(nextP, nextSong)
 
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
@@ -469,6 +539,7 @@ class AudioTransitionEngine(
                 throw e
             } catch (e: Exception) {
                 Log.e(tag, "Automix skip failed, falling back to direct play", e)
+                effects.clearBassCuts()
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
                 playSong(nextSong)
             }
@@ -476,6 +547,15 @@ class AudioTransitionEngine(
     }
 
     private fun setDataSource(player: MediaPlayer, song: Song) {
+        val slot = playerIndexOf(player)
+        if (slot >= 0) {
+            songOnPlayer[slot] = song
+            // Snap to the right level before the song is heard (main thread only; the ticker covers the rest)
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                refreshLevel(slot)
+                shownScale[slot] = effects.volumeScale(slot)
+            }
+        }
         if (!song.filePath.isNullOrBlank() && File(song.filePath).exists()) {
             player.setDataSource(song.filePath)
             return
@@ -566,7 +646,7 @@ class AudioTransitionEngine(
             try {
                 val player = activePlayer ?: return@launch
                 player.reset()
-                player.setVolume(_playbackState.value.volume, _playbackState.value.volume)
+                applyVol(player, _playbackState.value.volume)
                 setDataSource(player, song)
                 player.prepare()
                 val dur = player.duration.toLong()
@@ -620,7 +700,7 @@ class AudioTransitionEngine(
     fun setVolume(volume: Float) {
         val clamped = volume.coerceIn(0.0f, 1.0f)
         _playbackState.value = _playbackState.value.copy(volume = clamped)
-        activePlayer?.setVolume(clamped, clamped)
+        applyVol(activePlayer, clamped)
     }
 
 
@@ -720,7 +800,7 @@ class AudioTransitionEngine(
             try {
                 val nextP = standbyPlayer ?: return@launch
                 nextP.reset()
-                nextP.setVolume(0.0f, 0.0f)
+                applyVol(nextP, 0.0f)
                 setDataSource(nextP, nextSong)
                 nextP.prepare()
                 isPreparedB = true
@@ -738,6 +818,7 @@ class AudioTransitionEngine(
         tickerJob?.cancel()
         tickerJob = engineScope.launch {
             while (isActive) {
+                tickLevels()
                 val player = activePlayer
                 if (player != null && _playbackState.value.isPlaying) {
                     try {
@@ -809,6 +890,7 @@ class AudioTransitionEngine(
         val currentP = activePlayer ?: return
         val nextP = standbyPlayer ?: return
         val nextIndex = if (activePlayerIndex == 0) 1 else 0
+        val curIndex = 1 - nextIndex
 
         crossfadeJob?.cancel()
         crossfadeJob = engineScope.launch {
@@ -830,7 +912,7 @@ class AudioTransitionEngine(
                     setDataSource(nextP, nextSong)
                     nextP.prepare()
                 }
-                nextP.setVolume(0.0f, 0.0f)
+                applyVol(nextP, 0.0f)
                 if (plan.startBMs >= 20L) seekAndWait(nextP, plan.startBMs)
 
                 // Wait for the outgoing song to reach its beat (nothing advances while paused)
@@ -843,6 +925,7 @@ class AudioTransitionEngine(
                 }
 
                 // Release the incoming song. If the user already paused, resume() will start it later.
+                effects.setBassCut(nextIndex, 1f) // incoming song enters without its low end (bass swap)
                 if (_playbackState.value.isPlaying) nextP.start()
                 _playbackState.value = _playbackState.value.copy(isCrossfading = true)
                 if (plan.beatMatched) setTargetSpeed(nextIndex, plan.speedB)
@@ -858,13 +941,17 @@ class AudioTransitionEngine(
                     val fraction = if (oldSongEnded) 1.0f
                     else ((pos - plan.startAMs).toFloat() / plan.overlapMs).coerceIn(0.0f, 1.0f)
 
+                    // Bass swap: outgoing song hands its low end over around the middle of the blend
+                    effects.setBassCut(curIndex, smoothStep(0.30f, 0.60f, fraction))
+                    effects.setBassCut(nextIndex, 1f - smoothStep(0.40f, 0.70f, fraction))
+
                     // Equal-power curve
                     val angle = fraction * (PI.toFloat() / 2f)
                     val master = _playbackState.value.volume
                     val fadeOutVol = cos(angle) * master
                     val fadeInVol = sin(angle) * master
-                    currentP.setVolume(fadeOutVol, fadeOutVol)
-                    nextP.setVolume(fadeInVol, fadeInVol)
+                    applyVol(currentP, fadeOutVol)
+                    applyVol(nextP, fadeInVol)
 
                     // Keep the two beat grids locked: gently nudge the incoming speed if it drifts
                     if (plan.beatMatched && playing && fraction < 1.0f) {
@@ -895,11 +982,12 @@ class AudioTransitionEngine(
                 // Blend finished
                 try { currentP.pause() } catch (e: Exception) { /* ignore */ }
                 try { currentP.reset() } catch (e: Exception) { /* ignore */ }
-                currentP.setVolume(1.0f, 1.0f)
+                applyVol(currentP, 1.0f)
                 val master = _playbackState.value.volume
-                nextP.setVolume(master, master)
+                applyVol(nextP, master)
                 if (!swapped) swapToNextSong(nextP, nextSong)
 
+                effects.clearBassCuts()
                 isPreparedB = false
                 preloadedSongId = null
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
@@ -909,6 +997,7 @@ class AudioTransitionEngine(
                 throw e
             } catch (e: Exception) {
                 Log.e(tag, "Crossfade execution failed", e)
+                effects.clearBassCuts()
                 crossfadeFailedForId = currentSong.id
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
             }
@@ -947,5 +1036,6 @@ class AudioTransitionEngine(
         playerB?.release()
         playerA = null
         playerB = null
+        effects.release()
     }
 }
