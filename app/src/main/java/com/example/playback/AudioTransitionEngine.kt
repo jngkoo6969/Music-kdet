@@ -54,7 +54,9 @@ data class PlaybackState(
     val crossfadeDurationSec: Int = -1, // -1 (Auto: length chosen per song pair), 0 (Off), 2, 4, 6, 8, 12
     val manualFadeDurationMs: Long = 800L, // skip crossfade (Next / Previous): 0 = Off
     val volume: Float = 1.0f,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /** Length and kind of the last Automix blend, e.g. "11.2 s · beat-matched (auto)". */
+    val lastBlendInfo: String? = null
 )
 
 class AudioTransitionEngine(
@@ -892,6 +894,10 @@ class AudioTransitionEngine(
                 val startA = if (late) nowPos else plan.startAMs
                 val overlap = if (late) max(600L, min(plan.overlapMs, plan.startAMs + plan.overlapMs - nowPos)) else plan.overlapMs
                 val matched = plan.beatMatched && !late
+                _playbackState.value = _playbackState.value.copy(
+                    lastBlendInfo = "${overlap / 100L / 10.0} s · " +
+                        (if (matched) "beat-matched" else "crossfade") + (if (auto) " (auto)" else "")
+                )
 
                 // Release the incoming song. If the user already paused, resume() will start it later.
                 effects.setBassCut(nextIndex, 1f) // incoming song enters without its low end (bass swap)
