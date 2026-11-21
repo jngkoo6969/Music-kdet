@@ -527,6 +527,7 @@ fun MainAppScreen(viewModel: MusicViewModel) {
                         manualFadeDurationMs = playbackState.manualFadeDurationMs,
                         onManualFadeDurationChange = { viewModel.setManualFadeMs(it) },
                         soundSettings = soundSettings,
+                        lastBlendInfo = playbackState.lastBlendInfo,
                         onSoundSettingsChange = { viewModel.updateSound(it) },
                         songs = songs,
                         onRescanDevice = { viewModel.scanDeviceMusic() },
