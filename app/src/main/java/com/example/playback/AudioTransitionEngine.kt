@@ -103,6 +103,9 @@ class AudioTransitionEngine(
         const val SPEED_RAMP_MS = 6_000L
         /** Longest blend Auto may choose; the engine starts watching this early. */
         const val AUTO_MAX_FADE_MS = 20_000L
+        /** Bass swap window, as a fraction of the blend: low end changes hands between these two points. */
+        const val BASS_SWAP_START = 0.42f
+        const val BASS_SWAP_END = 0.58f
     }
 
     private var crossfadeJob: Job? = null
@@ -286,6 +289,18 @@ class AudioTransitionEngine(
         }
     }
 
+    /**
+     * Bass swap during a blend. The outgoing song loses its low end exactly as the incoming one gets it back
+     * (the two cuts always add up to 1), in a short window around the middle of the blend.
+     * The old curves overlapped from 30 % to 70 %, so both songs had a heavily cut low end for 40 % of the
+     * blend and the bass sagged; this window is 16 % wide, so the dip is shallow and brief.
+     */
+    private fun applyBassSwap(outIndex: Int, inIndex: Int, fraction: Float) {
+        val swap = smoothStep(BASS_SWAP_START, BASS_SWAP_END, fraction)
+        effects.setBassCut(outIndex, swap)
+        effects.setBassCut(inIndex, 1f - swap)
+    }
+
     private fun smoothStep(e0: Float, e1: Float, x: Float): Float {
         val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
         return t * t * (3f - 2f * t)
@@ -464,8 +479,7 @@ class AudioTransitionEngine(
                     else ((pos - startPos).toFloat() / overlapMs).coerceIn(0.0f, 1.0f)
 
                     if (overlapMs >= 1_500L) { // a bass swap only makes sense for a real blend, not a quick skip
-                        effects.setBassCut(skipCurIndex, smoothStep(0.30f, 0.60f, fraction))
-                        effects.setBassCut(skipNextIndex, 1f - smoothStep(0.40f, 0.70f, fraction))
+                        applyBassSwap(skipCurIndex, skipNextIndex, fraction)
                     }
 
                     val angle = fraction * (PI.toFloat() / 2f)
@@ -749,6 +763,27 @@ class AudioTransitionEngine(
         }
     }
 
+    /**
+     * Call after the queue changed (play next, add, remove, reorder): the song that follows may now be a
+     * different one, so analyze and prepare it now instead of in the middle of the blend.
+     * Does nothing while a blend or a manual fade is running (the standby player is in use then;
+     * the engine preloads again by itself when that transition ends).
+     */
+    fun refreshNext() {
+        // Debounced: dragging a song in the queue fires this many times in a row; only the last one matters.
+        refreshNextJob?.cancel()
+        refreshNextJob = engineScope.launch {
+            delay(500L)
+            if (_playbackState.value.isCrossfading ||
+                crossfadeJob?.isActive == true ||
+                manualTransitionJob?.isActive == true
+            ) return@launch
+            preloadNextTrack()
+        }
+    }
+
+    private var refreshNextJob: Job? = null
+
     private fun preloadNextTrack() {
         val nextSong = getNextSong() ?: return
         analyzeAsync(nextSong)
@@ -792,6 +827,9 @@ class AudioTransitionEngine(
                         // can be parked on one of its beats and released exactly on one of ours.
                         val currentSong = _playbackState.value.currentSong
                         if (currentSong != null) analyzeAsync(currentSong)
+                        // Also keep the upcoming song analyzed, whatever changed the queue (play next, reorder, ...),
+                        // so the blend never has to wait for its analysis. Cheap: a cached song returns at once.
+                        getNextSong()?.let { analyzeAsync(it) }
                         val analysis = currentSong?.let { analyzer.cached(it) }
                         val endMs = analysis?.audibleEndMs
                             ?.takeIf { it > 0 && it <= duration }
@@ -920,8 +958,7 @@ class AudioTransitionEngine(
                     else ((pos - startA).toFloat() / overlap).coerceIn(0.0f, 1.0f)
 
                     // Bass swap: outgoing song hands its low end over around the middle of the blend
-                    effects.setBassCut(curIndex, smoothStep(0.30f, 0.60f, fraction))
-                    effects.setBassCut(nextIndex, 1f - smoothStep(0.40f, 0.70f, fraction))
+                    applyBassSwap(curIndex, nextIndex, fraction)
 
                     // Equal-power curve
                     val angle = fraction * (PI.toFloat() / 2f)
