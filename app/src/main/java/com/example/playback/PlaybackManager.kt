@@ -51,7 +51,7 @@ class PlaybackManager private constructor(private val context: Context) {
     init {
         // Restore saved Automix / skip-fade settings (they used to reset to 4 sec on every launch)
         engine.setCrossfadeDurationSec(prefs.getInt("automix_sec", -1))
-        engine.setManualFadeDurationMs(prefs.getLong("manual_fade_ms", 400L))
+        engine.setManualFadeDurationMs(prefs.getLong("skip_fade_ms", 800L))
         try {
             engine.setRepeatMode(RepeatMode.valueOf(prefs.getString("repeat", RepeatMode.ALL.name) ?: RepeatMode.ALL.name))
         } catch (e: Exception) { /* keep default */ }
@@ -107,6 +107,9 @@ class PlaybackManager private constructor(private val context: Context) {
     }
 
     companion object {
+        /** Previous restarts the current song only after it played this long; before that it goes to the previous song. */
+        const val RESTART_AFTER_MS = 10_000L
+
         @Volatile
         private var INSTANCE: PlaybackManager? = null
 
@@ -200,8 +203,9 @@ class PlaybackManager private constructor(private val context: Context) {
     }
 
     fun skipPrevious() {
-        // If > 3 seconds in, seek to start of current song first
-        if (playbackState.value.currentPositionMs > 3000L) {
+        // Only when the song has been playing for a while (> RESTART_AFTER_MS) does Previous restart it first.
+        // During a blend the position still belongs to the old song, so then Previous always means "previous song".
+        if (!playbackState.value.isCrossfading && playbackState.value.currentPositionMs > RESTART_AFTER_MS) {
             engine.seekTo(0L)
             return
         }
@@ -264,7 +268,7 @@ class PlaybackManager private constructor(private val context: Context) {
 
     fun setManualFadeDuration(millis: Long) {
         engine.setManualFadeDurationMs(millis)
-        prefs.edit().putLong("manual_fade_ms", millis).apply()
+        prefs.edit().putLong("skip_fade_ms", millis).apply()
     }
 
     fun addToQueue(song: Song) {
