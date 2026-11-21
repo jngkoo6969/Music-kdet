@@ -334,6 +334,37 @@ class AudioTransitionEngine(
             }
 
             try {
+                // Gapless: the next song is usually already prepared on the standby player. Start THAT one instead of
+                // loading from scratch, so a song that simply ends (Automix off / failed blend) is followed at once.
+                val pre = standbyPlayer
+                if (startPositionMs == 0L && isPreparedB && preloadedSongId == song.id && pre != null &&
+                    !(try { pre.isPlaying } catch (e: Exception) { true })
+                ) {
+                    val old = activePlayer
+                    activePlayerIndex = 1 - activePlayerIndex
+                    try { old?.reset() } catch (e: Exception) { /* ignore */ }
+                    isPreparedB = false
+                    preloadedSongId = null
+                    val idx = activePlayerIndex
+                    refreshLevel(idx)
+                    shownScale[idx] = effects.volumeScale(idx)
+                    applyVol(pre, _playbackState.value.volume)
+                    pre.start()
+                    flushSpeed(idx)
+                    crossfadeFailedForId = null
+                    _playbackState.value = _playbackState.value.copy(
+                        currentSong = song,
+                        isPlaying = true,
+                        currentPositionMs = 0L,
+                        durationMs = pre.duration.toLong(),
+                        isCrossfading = false,
+                        errorMessage = null
+                    )
+                    onSongChanged(song)
+                    preloadNextTrack()
+                    return@launch
+                }
+
                 val player = activePlayer ?: return@launch
                 player.reset()
                 applyVol(player, _playbackState.value.volume)
@@ -768,15 +799,20 @@ class AudioTransitionEngine(
                         val autoFade = crossfadeSec < 0
                         val crossfadeMs = if (autoFade) AUTO_MAX_FADE_MS else crossfadeSec * 1000L
 
-                        if (crossfadeSec != 0 &&
-                            duration > (crossfadeMs + 2000L) &&
-                            (endMs - currentPos) <= crossfadeMs + PREROLL_MS &&
+                        val minLen = if (autoFade) 8_000L else crossfadeMs + 2_000L
+                        val blendDue = crossfadeSec != 0 && duration > minLen &&
+                            (endMs - currentPos) <= crossfadeMs + PREROLL_MS
+                        // Automix Off: still don't sit through a silent tail - go to the next song once the music is gone
+                        val silenceSkip = crossfadeSec == 0 && analysis != null &&
+                            endMs < duration - 1_500L && currentPos >= endMs - 150L
+
+                        if ((blendDue || silenceSkip) &&
                             crossfadeJob?.isActive != true &&
                             !_playbackState.value.isCrossfading &&
                             currentSong?.id != crossfadeFailedForId &&
                             _playbackState.value.repeatMode != RepeatMode.ONE
                         ) {
-                            startCrossfade(crossfadeMs, autoFade)
+                            startCrossfade(if (silenceSkip) 300L else crossfadeMs, autoFade && !silenceSkip)
                         }
                     } catch (e: Exception) {
                         // ignore transitory illegal state during track switch
@@ -849,22 +885,30 @@ class AudioTransitionEngine(
                     delay(if (remaining > 100L) 60L else 4L)
                 }
 
+                // Already past the planned start (the analysis finished late)? Then blend from NOW with a short
+                // fade instead of jumping, so the next song never starts after a silent gap.
+                val nowPos = try { currentP.currentPosition.toLong() } catch (e: Exception) { return@launch }
+                val late = nowPos > plan.startAMs + 200L
+                val startA = if (late) nowPos else plan.startAMs
+                val overlap = if (late) max(600L, min(plan.overlapMs, plan.startAMs + plan.overlapMs - nowPos)) else plan.overlapMs
+                val matched = plan.beatMatched && !late
+
                 // Release the incoming song. If the user already paused, resume() will start it later.
                 effects.setBassCut(nextIndex, 1f) // incoming song enters without its low end (bass swap)
                 if (_playbackState.value.isPlaying) nextP.start()
                 _playbackState.value = _playbackState.value.copy(isCrossfading = true)
-                if (plan.beatMatched) setTargetSpeed(nextIndex, plan.speedB)
+                if (matched) setTargetSpeed(nextIndex, plan.speedB)
 
                 var swapped = false
                 var lastCorrection = 0L
 
                 while (isActive) {
-                    val pos = try { currentP.currentPosition.toLong() } catch (e: Exception) { plan.startAMs + plan.overlapMs }
+                    val pos = try { currentP.currentPosition.toLong() } catch (e: Exception) { startA + overlap }
                     val playing = _playbackState.value.isPlaying
                     val oldSongEnded = playing && try { !currentP.isPlaying } catch (e: Exception) { true }
 
                     val fraction = if (oldSongEnded) 1.0f
-                    else ((pos - plan.startAMs).toFloat() / plan.overlapMs).coerceIn(0.0f, 1.0f)
+                    else ((pos - startA).toFloat() / overlap).coerceIn(0.0f, 1.0f)
 
                     // Bass swap: outgoing song hands its low end over around the middle of the blend
                     effects.setBassCut(curIndex, smoothStep(0.30f, 0.60f, fraction))
@@ -879,13 +923,13 @@ class AudioTransitionEngine(
                     applyVol(nextP, fadeInVol)
 
                     // Keep the two beat grids locked: gently nudge the incoming speed if it drifts
-                    if (plan.beatMatched && playing && fraction < 1.0f) {
+                    if (matched && playing && fraction < 1.0f) {
                         val now = SystemClock.elapsedRealtime()
                         if (now - lastCorrection >= 500L) {
                             lastCorrection = now
                             val posB = try { nextP.currentPosition.toLong() } catch (e: Exception) { -1L }
                             if (posB >= 0L) {
-                                val expectedB = plan.startBMs + (pos - plan.startAMs) * plan.speedB
+                                val expectedB = plan.startBMs + (pos - startA) * plan.speedB
                                 val err = posB - expectedB // > 0 means the incoming song is ahead
                                 val speed = if (abs(err) > 25f) {
                                     plan.speedB * (1f + (-err / 2500f).coerceIn(-0.015f, 0.015f))
@@ -916,7 +960,7 @@ class AudioTransitionEngine(
                 isPreparedB = false
                 preloadedSongId = null
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
-                if (plan.beatMatched) startSpeedRamp(nextIndex)
+                if (matched) startSpeedRamp(nextIndex)
                 preloadNextTrack()
             } catch (e: CancellationException) {
                 throw e
@@ -924,6 +968,8 @@ class AudioTransitionEngine(
                 Log.e(tag, "Crossfade execution failed", e)
                 effects.clearBassCuts()
                 crossfadeFailedForId = currentSong.id
+                isPreparedB = false // the standby player may be parked mid-song: never reuse it as a fresh start
+                preloadedSongId = null
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
             }
         }
