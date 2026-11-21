@@ -42,12 +42,15 @@ data class BeatInfo(
  *                                    audibleEndMs = -1 when unknown.
  *  - head : beat grid measured in the first ~45 s  (used when the song is the INCOMING one)
  *  - tail : beat grid measured in the last  ~45 s  (used when the song is the OUTGOING one)
+ *  - loudnessDb : how loud the song is, so Automix and normal playback can keep every song at a similar level
  */
 data class TrackAnalysis(
     val audibleStartMs: Long,
     val audibleEndMs: Long,
     val head: BeatInfo?,
-    val tail: BeatInfo?
+    val tail: BeatInfo?,
+    /** Measured loudness (RMS, dBFS) of the song's louder parts; null when unknown. Used for volume leveling. */
+    val loudnessDb: Double? = null
 )
 
 class TrackAnalyzer(private val context: Context) {
@@ -80,7 +83,8 @@ class TrackAnalyzer(private val context: Context) {
             audibleStartMs = head?.firstAudibleMs?.takeIf { it >= 0 } ?: 0L,
             audibleEndMs = tail?.lastAudibleMs?.takeIf { it >= 0 } ?: -1L,
             head = head?.let { beatsOf(it, tail = false) },
-            tail = tail?.let { beatsOf(it, tail = true) }
+            tail = tail?.let { beatsOf(it, tail = true) },
+            loudnessDb = loudnessOf(head, tail)
         )
 
         val k = key(song)
@@ -90,7 +94,8 @@ class TrackAnalyzer(private val context: Context) {
             tag,
             "Analyzed '${song.title}': audible=${result.audibleStartMs}..${result.audibleEndMs} " +
                 "head=${result.head?.bpm?.toInt()}bpm(${result.head?.confidence?.toInt()}) " +
-                "tail=${result.tail?.bpm?.toInt()}bpm(${result.tail?.confidence?.toInt()})"
+                "tail=${result.tail?.bpm?.toInt()}bpm(${result.tail?.confidence?.toInt()}) " +
+                "loudness=${result.loudnessDb?.let { "%.1f".format(it) }}dB"
         )
         return result
     }
@@ -248,6 +253,26 @@ class TrackAnalyzer(private val context: Context) {
         }
     }
 
+    /**
+     * Loudness of a song from the two decoded windows (already computed for the beat detection, so free).
+     * Quiet hops (intro / fade-out / silence) are ignored and only the louder 70 % are averaged in power,
+     * which makes the number follow how the song sounds in its main sections.
+     */
+    private fun loudnessOf(head: Scan?, tail: Scan?): Double? {
+        val values = ArrayList<Float>()
+        for (sc in listOf(head, tail)) {
+            if (sc == null) continue
+            for (i in 0 until sc.hops) if (sc.full[i] > GATE_RMS) values.add(sc.full[i])
+        }
+        if (values.size < 200) return null
+        values.sortDescending()
+        val use = (values.size * 0.7).toInt().coerceAtLeast(1)
+        var power = 0.0
+        for (i in 0 until use) power += values[i].toDouble() * values[i]
+        val rms = sqrt(power / use)
+        return 20.0 * kotlin.math.log10(rms / 32768.0)
+    }
+
     private fun beatsOf(scan: Scan, tail: Boolean): BeatInfo? {
         if (scan.firstAudibleMs < 0 || scan.lastAudibleMs < 0 || scan.hops < BeatDetector.MIN_HOPS) return null
         val envEnd = scan.envStartMs + scan.hops * scan.hopMs
@@ -282,24 +307,25 @@ class TrackAnalyzer(private val context: Context) {
     }
 
     private fun encode(a: TrackAnalysis) =
-        "${a.audibleStartMs};${a.audibleEndMs};${encodeBeat(a.head)};${encodeBeat(a.tail)}"
+        "${a.audibleStartMs};${a.audibleEndMs};${encodeBeat(a.head)};${encodeBeat(a.tail)};${a.loudnessDb ?: "-"}"
 
     private fun decode(s: String): TrackAnalysis? = try {
         val p = s.split(";")
-        if (p.size != 4) null
-        else TrackAnalysis(p[0].toLong(), p[1].toLong(), decodeBeat(p[2]), decodeBeat(p[3]))
+        if (p.size != 5) null
+        else TrackAnalysis(p[0].toLong(), p[1].toLong(), decodeBeat(p[2]), decodeBeat(p[3]), p[4].toDoubleOrNull())
     } catch (e: Exception) {
         null
     }
 
     companion object {
         /** Bump when the algorithm changes so old cached results are ignored. */
-        private const val VERSION = 3
+        private const val VERSION = 4
         private const val WINDOW_MS = 45_000L   // longer window = steadier tempo estimate
         private const val REGION_MS = 28_000.0
         private const val HOP_SECONDS = 0.010
         private const val LOW_BAND_HZ = 150.0
         private const val MAX_HOPS = 6_000
+        private const val GATE_RMS = 250f        // about -42 dBFS: below this a hop is silence / fade
         private const val AUDIBLE_THRESHOLD = 700 // about -33 dB on a 16-bit scale
     }
 }
