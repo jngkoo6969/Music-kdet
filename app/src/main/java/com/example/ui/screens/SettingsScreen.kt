@@ -43,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.Song
+import com.example.playback.SoundSettings
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.AppleMusicRed
 
@@ -54,6 +55,8 @@ fun SettingsScreen(
     onCrossfadeDurationChange: (Int) -> Unit,
     manualFadeDurationMs: Long,
     onManualFadeDurationChange: (Long) -> Unit,
+    soundSettings: SoundSettings,
+    onSoundSettingsChange: (SoundSettings) -> Unit,
     songs: List<Song>,
     onRescanDevice: () -> Unit,
     formatDuration: (Long) -> String,
@@ -164,7 +167,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, silent intro/outro), then the next one starts on a beat and is gently tempo-matched. Works offline. Choose the overlap length.",
+                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, loudness, silent intro/outro), then the next one starts on a beat, is tempo-matched and level-matched, and swaps bass with the outgoing song. Works offline. Choose the overlap length.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -232,6 +235,12 @@ fun SettingsScreen(
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        // Equalizer, bass, stereo width, volume leveling
+        item {
+            SoundSection(settings = soundSettings, onChange = onSoundSettingsChange)
             Spacer(modifier = Modifier.height(24.dp))
         }
 
