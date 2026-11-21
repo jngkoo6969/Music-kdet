@@ -51,7 +51,7 @@ data class PlaybackState(
     val isCrossfading: Boolean = false,
     val repeatMode: RepeatMode = RepeatMode.ALL,
     val isShuffle: Boolean = false,
-    val crossfadeDurationSec: Int = 4, // 0 (Off), 2, 4, 6, 8, 12
+    val crossfadeDurationSec: Int = -1, // -1 (Auto: length chosen per song pair), 0 (Off), 2, 4, 6, 8, 12
     val manualFadeDurationMs: Long = 400L,
     val volume: Float = 1.0f,
     val errorMessage: String? = null
@@ -99,6 +99,10 @@ class AudioTransitionEngine(
         const val START_LATENCY_MS = 40L
         /** After the blend, the incoming song eases from the matched speed back to 1.0x over this time. */
         const val SPEED_RAMP_MS = 6_000L
+        /** Longest blend Auto may choose; the engine starts watching this early. */
+        const val AUTO_MAX_FADE_MS = 20_000L
+        /** Auto blend used when the user presses Next / Previous. */
+        const val AUTO_SKIP_FADE_MS = 5_000L
     }
 
     private var crossfadeJob: Job? = null
@@ -374,8 +378,8 @@ class AudioTransitionEngine(
     fun transitionToSong(nextSong: Song, isNext: Boolean = true) {
         // Automix is on: pressing Next / Previous blends into the new song instead of cutting to it.
         val automixSec = _playbackState.value.crossfadeDurationSec
-        if (automixSec > 0 && _playbackState.value.isPlaying && activePlayer != null) {
-            automixSkipTo(nextSong, automixSec * 1000L)
+        if (automixSec != 0 && _playbackState.value.isPlaying && activePlayer != null) {
+            automixSkipTo(nextSong, if (automixSec < 0) AUTO_SKIP_FADE_MS else automixSec * 1000L)
             return
         }
 
@@ -840,9 +844,10 @@ class AudioTransitionEngine(
                             ?: duration
 
                         val crossfadeSec = _playbackState.value.crossfadeDurationSec
-                        val crossfadeMs = crossfadeSec * 1000L
+                        val autoFade = crossfadeSec < 0
+                        val crossfadeMs = if (autoFade) AUTO_MAX_FADE_MS else crossfadeSec * 1000L
 
-                        if (crossfadeSec > 0 &&
+                        if (crossfadeSec != 0 &&
                             duration > (crossfadeMs + 2000L) &&
                             (endMs - currentPos) <= crossfadeMs + PREROLL_MS &&
                             crossfadeJob?.isActive != true &&
@@ -850,7 +855,7 @@ class AudioTransitionEngine(
                             currentSong?.id != crossfadeFailedForId &&
                             _playbackState.value.repeatMode != RepeatMode.ONE
                         ) {
-                            startCrossfade(crossfadeMs)
+                            startCrossfade(crossfadeMs, autoFade)
                         }
                     } catch (e: Exception) {
                         // ignore transitory illegal state during track switch
@@ -884,7 +889,7 @@ class AudioTransitionEngine(
      *  6. title / artwork switch at the midpoint of the fade
      * If beat info is missing or the tempos are too far apart it falls back to a plain equal-power crossfade.
      */
-    private fun startCrossfade(crossfadeMs: Long) {
+    private fun startCrossfade(crossfadeMs: Long, auto: Boolean = false) {
         val nextSong = getNextSong() ?: return
         val currentSong = _playbackState.value.currentSong ?: return
         val currentP = activePlayer ?: return
@@ -897,12 +902,11 @@ class AudioTransitionEngine(
             try {
                 val durationA = try { currentP.duration.toLong() } catch (e: Exception) { return@launch }
                 val plan = withContext(Dispatchers.IO) {
-                    MixPlanner.plan(
-                        analyzer.analyze(currentSong),
-                        analyzer.analyze(nextSong),
-                        durationA,
-                        crossfadeMs
-                    )
+                    val analysisA = analyzer.analyze(currentSong)
+                    val analysisB = analyzer.analyze(nextSong)
+                    // Auto: the blend length comes from the two songs (open outro / open intro)
+                    val fadeMs = if (auto) MixPlanner.autoFadeMs(analysisA, analysisB) else crossfadeMs
+                    MixPlanner.plan(analysisA, analysisB, durationA, fadeMs)
                 }
                 Log.d(tag, "Automix plan to '${nextSong.title}': $plan")
 
