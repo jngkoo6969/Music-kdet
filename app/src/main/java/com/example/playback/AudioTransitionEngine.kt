@@ -858,6 +858,9 @@ class AudioTransitionEngine(
 
         crossfadeJob?.cancel()
         crossfadeJob = engineScope.launch {
+            // Declared outside try so the error handler knows how far the blend got
+            var released = false // incoming song was started
+            var swapped = false  // title / queue already switched to the incoming song
             try {
                 val durationA = try { currentP.duration.toLong() } catch (e: Exception) { return@launch }
                 val plan = withContext(Dispatchers.IO) {
@@ -901,11 +904,11 @@ class AudioTransitionEngine(
 
                 // Release the incoming song. If the user already paused, resume() will start it later.
                 effects.setBassCut(nextIndex, 1f) // incoming song enters without its low end (bass swap)
+                released = true
                 if (_playbackState.value.isPlaying) nextP.start()
                 _playbackState.value = _playbackState.value.copy(isCrossfading = true)
                 if (matched) setTargetSpeed(nextIndex, plan.speedB)
 
-                var swapped = false
                 var lastCorrection = 0L
 
                 while (isActive) {
@@ -973,7 +976,26 @@ class AudioTransitionEngine(
             } catch (e: Exception) {
                 Log.e(tag, "Crossfade execution failed", e)
                 effects.clearBassCuts()
-                crossfadeFailedForId = currentSong.id
+                if (released) {
+                    // The blend died half-way: never leave two songs running or a song stuck at a half volume.
+                    val master = _playbackState.value.volume
+                    if (swapped) {
+                        // The new song already took over -> finish the hand-over and retire the old song
+                        try { currentP.pause() } catch (ex: Exception) { /* ignore */ }
+                        try { currentP.reset() } catch (ex: Exception) { /* ignore */ }
+                        applyVol(currentP, 1.0f)
+                        applyVol(nextP, master)
+                        startSpeedRamp(nextIndex)
+                    } else {
+                        // Not switched yet -> keep the current song at full volume, drop the half-started one
+                        try { nextP.pause() } catch (ex: Exception) { /* ignore */ }
+                        try { nextP.reset() } catch (ex: Exception) { /* ignore */ }
+                        applyVol(nextP, 1.0f)
+                        setTargetSpeed(nextIndex, 1f)
+                        applyVol(currentP, master)
+                    }
+                }
+                if (!swapped) crossfadeFailedForId = currentSong.id
                 isPreparedB = false // the standby player may be parked mid-song: never reuse it as a fresh start
                 preloadedSongId = null
                 _playbackState.value = _playbackState.value.copy(isCrossfading = false)
