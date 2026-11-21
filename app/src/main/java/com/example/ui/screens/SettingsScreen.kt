@@ -167,7 +167,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, loudness, silent intro/outro), then the next one starts on a beat, is tempo-matched and level-matched, and swaps bass with the outgoing song. Works offline. Choose the overlap length.",
+                            text = "Songs blend like a DJ mix. Each song is analyzed on your phone (tempo, beats, loudness, intro/outro) and the next one starts on a beat, is tempo-matched and level-matched, and swaps bass with the outgoing song. Auto picks a different blend length for every pair of songs - long when music meets music, shorter when two voices would clash. Works offline. Or choose a fixed length.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -175,7 +175,7 @@ fun SettingsScreen(
                 }
                 Spacer(modifier = Modifier.height(14.dp))
 
-                val crossfadeOptions = listOf(0 to "Off", 2 to "2 sec", 4 to "4 sec", 6 to "6 sec", 8 to "8 sec", 12 to "12 sec")
+                val crossfadeOptions = listOf(-1 to "Auto (smart length)", 0 to "Off", 2 to "2 sec", 4 to "4 sec", 6 to "6 sec", 8 to "8 sec", 12 to "12 sec")
                 crossfadeOptions.forEach { (sec, label) ->
                     Row(
                         modifier = Modifier
