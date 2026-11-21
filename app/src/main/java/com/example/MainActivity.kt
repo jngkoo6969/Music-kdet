@@ -181,6 +181,7 @@ fun MainAppScreen(viewModel: MusicViewModel) {
     val isQueueViewVisible by viewModel.isQueueViewVisible.collectAsStateWithLifecycle()
 
     val songs by viewModel.allSongs.collectAsStateWithLifecycle()
+    val soundSettings by viewModel.soundSettings.collectAsStateWithLifecycle()
     val favoriteSongs by viewModel.favoriteSongs.collectAsStateWithLifecycle()
     val recentlyPlayedSongs by viewModel.recentlyPlayedSongs.collectAsStateWithLifecycle()
     val recentlyAddedSongs by viewModel.recentlyAddedSongs.collectAsStateWithLifecycle()
@@ -525,6 +526,8 @@ fun MainAppScreen(viewModel: MusicViewModel) {
                         onCrossfadeDurationChange = { viewModel.setCrossfadeSec(it) },
                         manualFadeDurationMs = playbackState.manualFadeDurationMs,
                         onManualFadeDurationChange = { viewModel.setManualFadeMs(it) },
+                        soundSettings = soundSettings,
+                        onSoundSettingsChange = { viewModel.updateSound(it) },
                         songs = songs,
                         onRescanDevice = { viewModel.scanDeviceMusic() },
                         formatDuration = { viewModel.formatDuration(it) }
