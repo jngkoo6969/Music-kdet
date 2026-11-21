@@ -73,14 +73,22 @@ class TrackAnalyzer(private val context: Context) {
     private val prefs = context.getSharedPreferences("automix_analysis", Context.MODE_PRIVATE)
     private val memory = ConcurrentHashMap<String, TrackAnalysis>()
 
+    /** Keys already looked up and found NOT analyzed, so the 250 ms ticker doesn't re-read the saved data every time. */
+    private val notStored = ConcurrentHashMap.newKeySet<String>()
+
     private fun key(song: Song) = "v${VERSION}_${song.id}_${song.fileSize}"
 
     /** Returns the saved analysis if this song was already analyzed (in memory or from a previous launch). */
     fun cached(song: Song): TrackAnalysis? {
         val k = key(song)
         memory[k]?.let { return it }
-        val stored = prefs.getString(k, null) ?: return null
-        val decoded = decode(stored) ?: return null
+        if (k in notStored) return null
+        val stored = prefs.getString(k, null)
+        val decoded = stored?.let { decode(it) }
+        if (decoded == null) {
+            notStored.add(k)
+            return null
+        }
         memory[k] = decoded
         return decoded
     }
@@ -105,6 +113,7 @@ class TrackAnalyzer(private val context: Context) {
 
         val k = key(song)
         memory[k] = result
+        notStored.remove(k)
         try { prefs.edit().putString(k, encode(result)).apply() } catch (e: Exception) { /* cache only */ }
         Log.d(
             tag,
