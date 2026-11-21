@@ -47,6 +47,27 @@ object MixPlanner {
     /** When the tempos clash (can't be matched) a long blend sounds like mud, so keep it short. */
     private const val CLASH_FADE_MS = 3_000L
 
+    /**
+     * AUTO mode: picks the blend length for THIS pair of songs from what the songs themselves offer.
+     *
+     *  - both sides "open" (instrumental / fading outro meets quiet intro) -> long blend, 8..20 s: music meets music
+     *  - only one side open -> blend as long as that open part lasts, 5..14 s: the voice of one song
+     *    rides over the bare instrumental of the other, instead of two singers talking over each other
+     *  - neither side open (dense / abrupt) -> a short 4 s blend
+     *  - not analyzed yet -> 6 s
+     */
+    fun autoFadeMs(a: TrackAnalysis?, b: TrackAnalysis?): Long {
+        if (a == null || b == null) return 6_000L
+        val out = a.outroOpenMs
+        val inn = b.introOpenMs
+        val ms = when {
+            out >= 6_000L && inn >= 6_000L -> min(out, inn).coerceIn(8_000L, 20_000L)
+            out >= 4_000L || inn >= 4_000L -> max(out, inn).coerceIn(5_000L, 14_000L)
+            else -> 4_000L
+        }
+        return (ms / 1000L) * 1000L
+    }
+
     fun plan(a: TrackAnalysis, b: TrackAnalysis, durationAMs: Long, crossfadeMs: Long): MixPlan {
         val endA = a.audibleEndMs.takeIf { it > 0 && it <= durationAMs } ?: durationAMs
         val startBPlain = b.audibleStartMs.takeIf { it in 150L..8_000L } ?: 0L
